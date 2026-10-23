@@ -616,8 +616,16 @@ export class Engine {
 
   async unpin(threadId: string): Promise<boolean> {
     const current = await this.kv.get<Pin>(key.pin(threadId));
+    if (current === undefined) return false;
     await this.kv.delete(key.pin(threadId));
-    return current !== undefined;
+    await this.recordDecision(threadId, {
+      at: this.now(),
+      account: null,
+      previous: current.account,
+      detail: `Unpinned from ${current.account} by hand; the thread's next turn picks its account by the rules.`,
+      retryAt: null,
+    });
+    return true;
   }
 
   async explain(threadId: string): Promise<Explanation> {

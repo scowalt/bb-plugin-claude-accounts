@@ -3,7 +3,8 @@ import type { EngineStatus, Explanation } from "./engine";
 import { currentPercent, resetsAtMs, type UsageWindow } from "./usage";
 
 export function formatDuration(ms: number): string {
-  const minutes = Math.max(0, Math.round(ms / 60_000));
+  if (ms < 60_000) return "<1m";
+  const minutes = Math.round(ms / 60_000);
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   if (hours < 48) return `${hours}h ${minutes % 60}m`;
@@ -62,13 +63,20 @@ export function formatStatus(status: EngineStatus, now: number): string {
 
 export function formatExplanation(explanation: Explanation, now: number): string {
   const { pin, decision, next } = explanation;
-  if (pin === null) return `Thread ${explanation.threadId} has no pin yet; its next Claude turn picks an account.`;
   const lines = [
-    `Thread ${explanation.threadId} is pinned to ${pin.account}${pin.manual ? " (by hand)" : ""} since ${when(pin.at, now)}, model ${pin.model || "unknown"}.`,
+    pin === null
+      ? `Thread ${explanation.threadId} has no pin; its next Claude turn picks an account.`
+      : `Thread ${explanation.threadId} is pinned to ${pin.account}${pin.manual ? " (by hand)" : ""} since ${when(pin.at, now)}, model ${pin.model || "unknown"}.`,
   ];
   if (decision !== null) {
     lines.push(`Last decision ${when(decision.at, now)}: ${decision.detail}`);
-    if (decision.retryAt !== null) lines.push(`Retry queued for ${when(decision.retryAt, now)}.`);
+    if (decision.retryAt !== null) {
+      lines.push(
+        decision.retryAt > now
+          ? `A retry runs ${when(decision.retryAt, now)}.`
+          : `A retry was queued to run ${when(decision.retryAt, now)}.`,
+      );
+    }
   }
   if (next !== null) {
     lines.push(`Next turn: ${next.account ?? "default login"} — ${next.detail}`);

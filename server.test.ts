@@ -257,7 +257,7 @@ describe("claude-accounts", () => {
     expect(await env("thr_a")).toEqual(B_ENV);
     const explained = await harness.behavior.runCli(["explain", "thr_a"]);
     expect(explained.stdout).toContain("pinned to B");
-    expect(explained.stdout).toContain("Retry queued");
+    expect(explained.stdout).toContain("A retry runs in");
   });
 
   it("leaves the retry to Provider Retry when bb classified the rate limit", async () => {
@@ -308,6 +308,20 @@ describe("claude-accounts", () => {
     expect((await harness.behavior.runCli(["pin", "thr_a", "Z"])).exitCode).not.toBe(0);
     await harness.behavior.emitThreadEvent("thread.deleted", { thread: makeThreadResponse({ id: "thr_a" }) });
     expect((await harness.behavior.runCli(["explain", "thr_a"])).stdout).toContain("has no pin");
+  });
+
+  it("returns an unpinned thread to the rules and records why", async () => {
+    const { harness, env, thread } = await setup();
+    const fake = thread("thr_a");
+    await harness.behavior.runCli(["pin", "thr_a", "B"]);
+    expect(await env("thr_a")).toEqual(B_ENV);
+    expect((await harness.behavior.runCli(["unpin", "thr_a"])).stdout).toContain("Unpinned thr_a.");
+    expect((await harness.behavior.runCli(["explain", "thr_a"])).stdout).toContain("Unpinned from B by hand");
+    fake.turns = 3;
+    expect(await env("thr_a")).toEqual([]);
+    const explained = (await harness.behavior.runCli(["explain", "thr_a"])).stdout;
+    expect(explained).toContain("is pinned to A since");
+    expect(explained).toContain("Unpinned from B by hand");
   });
 
   it("publishes every account through provider-usage.v1", async () => {
