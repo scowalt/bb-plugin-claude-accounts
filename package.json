@@ -1,0 +1,46 @@
+{
+  "name": "bb-plugin-claude-accounts",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Spreads Pi threads across several Claude subscriptions by giving each thread a Claude Code config directory.",
+  "license": "MIT",
+  "engines": {
+    "bb": ">=0.46",
+    "bbPluginSdk": ">=0.6.49"
+  },
+  "bb": {
+    "name": "Claude Accounts",
+    "description": "Gives each Pi + claude-bridge thread one of your Claude subscriptions, prefers the largest plan with headroom, and moves a thread to another account between turns when its account runs out. Publishes every account's usage to bb's usage card.",
+    "branding": {
+      "icon": "Users"
+    },
+    "server": "./server.ts",
+    "host": "./host.ts",
+    "skills": [
+      "skills"
+    ]
+  },
+  "scripts": {
+    "build": "bb plugin build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.49",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.3.0",
+    "better-sqlite3": "^12.0.0",
+    "cron-parser": "^5.5.0",
+    "hono": "^4.11.9",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.7"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.28.2": true
+  }
+}
