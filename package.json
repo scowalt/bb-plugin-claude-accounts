@@ -4,6 +4,20 @@
   "type": "module",
   "description": "Spreads Pi threads across several Claude subscriptions by giving each thread a Claude Code config directory.",
   "license": "MIT",
+  "author": {
+    "name": "scowalt",
+    "url": "https://github.com/scowalt"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scowalt/bb-plugin-claude-accounts.git"
+  },
+  "keywords": [
+    "bb-plugin",
+    "claude",
+    "claude-code",
+    "pi"
+  ],
   "engines": {
     "bb": ">=0.46",
     "bbPluginSdk": ">=0.6.49"

@@ -2,8 +2,8 @@
 
 Spread your Pi threads across several Claude subscriptions.
 
-bb's built-in Account Pooler routes only threads on the `claude-code` and
-`codex` providers. This plugin covers threads on the `pi` provider that run
+As of bb 0.46, bb's built-in Account Pooler routes only threads on the
+`claude-code` and `codex` providers. This plugin covers threads on the `pi` provider that run
 Claude through [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge).
 It gives each thread one account and switches between turns. There is no proxy:
 the unmodified Claude Code binary talks to Anthropic with a login made through
@@ -42,6 +42,9 @@ Claude Code's own `/login`.
 
 ## Set up
 
+Requires bb 0.46 or newer and Pi with pi-claude-bridge. Tested with bb 0.46.1
+and pi-claude-bridge 0.9.3.
+
 1. Sign in each extra account on each machine where its threads should run:
 
    ```sh
@@ -54,10 +57,12 @@ Claude Code's own `/login`.
 2. Install the plugin and list the accounts:
 
    ```sh
-   bb plugin install ~/Code/bb-plugin-claude-accounts
+   bb plugin install https://github.com/scowalt/bb-plugin-claude-accounts.git
    bb plugin config claude-accounts set accounts "A=~/.claude, B=~/.claude-b"
    bb claude-accounts refresh
    ```
+
+   From a local checkout, run `bb plugin install .` instead.
 
 3. Check that `bb claude-accounts` shows each account signed in, with its plan
    and usage, and no warnings.
@@ -109,4 +114,4 @@ bb plugin build
 bb plugin reload claude-accounts
 ```
 
-MIT licensed.
+[MIT](LICENSE)
