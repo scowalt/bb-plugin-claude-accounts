@@ -77,6 +77,13 @@ export interface Block {
   families: Record<string, number>;
 }
 
+/** A retry this plugin queued through bb, kept so it can be dropped if the thread moves on first. */
+export interface PendingRetry {
+  queuedMessageId: string;
+  turnRequestId: string;
+  sendAt: number;
+}
+
 export interface HostInventory extends InspectResult {
   hostId: string;
   checkedAt: number;
@@ -129,6 +136,8 @@ const BLOCK_FALLBACK_MS = 60 * 60_000;
 const REFRESH_DEBOUNCE_MS = 60_000;
 const INSPECT_DEBOUNCE_MS = 30_000;
 const LOGIN_EXPIRY_WARNING_MS = 7 * 24 * 60 * 60_000;
+/** How long a dispatch's model answers for the environment bb prepares right after it. */
+const DISPATCH_MODEL_TTL_MS = 2 * 60_000;
 
 const requestEventSchema = z.object({
   requestId: z.string().optional(),
@@ -145,6 +154,7 @@ const key = {
   usage: (account: string) => `usage:${account}`,
   block: (account: string) => `block:${account}`,
   inventory: (hostId: string) => `inventory:${hostId}`,
+  retry: (threadId: string) => `retry:${threadId}`,
 };
 
 function errorText(error: unknown): string {
@@ -170,6 +180,7 @@ export class Engine {
   private readonly inspecting = new Map<string, Promise<void>>();
   private readonly lastInspect = new Map<string, number>();
   private readonly reading = new Map<string, Promise<void>>();
+  private readonly dispatches = new Map<string, { model: string | null; at: number }>();
 
   constructor(options: EngineOptions) {
     this.kv = options.kv;
@@ -392,10 +403,10 @@ export class Engine {
     hostId: string,
     model: string,
     settings: EngineSettings,
-    hasEarlierTurn: boolean,
+    hasEarlierTurn: () => Promise<boolean>,
   ): Promise<Pick> {
     const stored = (await this.kv.get<Pin>(key.pin(threadId))) ?? null;
-    const pin = stored ?? (await this.implicitPin(threadId, hostId, settings, hasEarlierTurn));
+    const pin = stored ?? (await this.implicitPin(threadId, hostId, settings, await hasEarlierTurn()));
     const pick = this.pick(settings, hostId, model, pin);
     if (pick.account === null) return pick;
     const changed = pin === null || pin.account !== pick.account;
@@ -421,14 +432,18 @@ export class Engine {
     return pick;
   }
 
+  /**
+   * The last turn request bb wrote. While bb prepares a turn this is still the previous turn's
+   * request: bb resolves the provider environment first and writes the new request afterwards.
+   */
   private async latestRequest(
     threadId: string,
-  ): Promise<{ seq: number; requestId: string | null; model: string | null; hasEarlierTurn: boolean } | null> {
+  ): Promise<{ seq: number; requestId: string | null; model: string | null } | null> {
     const rows = await this.sdk().threads.events.list({
       threadId,
       types: ["client/turn/requested"],
       order: "desc",
-      limit: "2",
+      limit: "1",
     });
     const row = rows[0];
     if (!row) return null;
@@ -437,8 +452,38 @@ export class Engine {
       seq: row.seq,
       requestId: data.success ? (data.data.requestId ?? null) : null,
       model: data.success ? (data.data.execution?.model ?? null) : null,
-      hasEarlierTurn: rows.length > 1,
     };
+  }
+
+  /** Whether a turn finished before the one bb is preparing, which has not finished yet. */
+  private async hasEarlierTurn(threadId: string): Promise<boolean> {
+    const rows = await this.sdk().threads.events.list({
+      threadId,
+      types: ["turn/completed"],
+      order: "desc",
+      limit: "1",
+    });
+    return rows.length > 0;
+  }
+
+  /**
+   * From the `message.dispatch` hook, which bb runs before it prepares a turn: the model that turn
+   * runs on. bb writes the turn's request event only after it resolves the provider environment, so
+   * this is the only current answer while the environment is resolved. Never throws.
+   */
+  noteDispatch(threadId: string, model: string | null): void {
+    const now = this.now();
+    for (const [id, note] of this.dispatches) {
+      if (now - note.at > DISPATCH_MODEL_TTL_MS) this.dispatches.delete(id);
+    }
+    this.dispatches.set(threadId, { model, at: now });
+  }
+
+  /** The model of the turn bb is preparing: the dispatch hook's note when fresh, else the last request bb wrote. */
+  private async turnModel(threadId: string): Promise<string | null> {
+    const note = this.dispatches.get(threadId);
+    if (note !== undefined && this.now() - note.at <= DISPATCH_MODEL_TTL_MS) return note.model;
+    return (await this.latestRequest(threadId))?.model ?? null;
   }
 
   private envFor(spec: AccountSpec, inspected: InspectedAccount | undefined): ExperimentalPluginProviderEnvEntry[] {
@@ -461,15 +506,15 @@ export class Engine {
   async resolveEnv(context: ExperimentalPluginProviderEnvContext): Promise<ExperimentalPluginProviderEnvEntry[]> {
     if (!context.threadId) return [];
     try {
-      const request = await this.latestRequest(context.threadId);
-      const model = request?.model ?? null;
+      const threadId = context.threadId;
+      const model = await this.turnModel(threadId);
       if (model === null || !isClaudeBridgeModel(model)) return [];
       if (!this.inventories.has(context.hostId)) {
         this.inspectSoon(context.hostId);
         return [];
       }
       const settings = await this.settings();
-      const pick = await this.decide(context.threadId, context.hostId, model, settings, request?.hasEarlierTurn ?? false);
+      const pick = await this.decide(threadId, context.hostId, model, settings, () => this.hasEarlierTurn(threadId));
       if (settings.mode !== "route" || pick.account === null) return [];
       const spec = settings.accounts.find((candidate) => candidate.name === pick.account);
       return spec ? this.envFor(spec, this.inventoryAccount(context.hostId, spec)) : [];
@@ -541,7 +586,7 @@ export class Engine {
       return;
     }
     const settings = await this.settings();
-    const pick = await this.decide(event.threadId, pin.hostId, pin.model, settings, true);
+    const pick = await this.decide(event.threadId, pin.hostId, pin.model, settings, async () => true);
     const moved = pick.account !== null && pick.account !== pin.account;
     if (settings.mode !== "route") {
       await record(`Observe mode: account ${pin.account} hit ${what}; routing would ${moved ? `move to ${pick.account}` : "wait"}.`, null, pick.account);
@@ -564,14 +609,21 @@ export class Engine {
     } else {
       const readyAt = pick.readyAt ?? until;
       if (readyAt - now <= MAX_RETRY_WAIT_MS) sendAt = Math.max(readyAt, now) + 30_000 + Math.round(this.random() * 60_000);
-      reason = `Claude Accounts: every account is out of quota; retrying when ${pick.account ?? pin.account} frees up`;
+      reason = `Claude Accounts: every account is out of quota; retrying when ${pick.readyAccount ?? pick.account ?? pin.account} frees up`;
     }
     if (sendAt === null) {
       await record(`Account ${pin.account} hit ${what}; no account frees up within 6 hours, so no retry was queued.`, null, pick.account);
       return;
     }
     try {
-      await this.sdk().threads.retry({ threadId: event.threadId, turnRequestId: event.requestId, sendAt, reason });
+      const queued = await this.sdk().threads.retry({ threadId: event.threadId, turnRequestId: event.requestId, sendAt, reason });
+      if (queued.delivery === "queued") {
+        await this.kv.set(key.retry(event.threadId), {
+          queuedMessageId: queued.queuedMessageId,
+          turnRequestId: event.requestId,
+          sendAt,
+        } satisfies PendingRetry);
+      }
       await record(reason.replace(/^Claude Accounts: /u, ""), sendAt, pick.account);
       this.log.info(`Thread ${event.threadId}: ${reason} at ${new Date(sendAt).toISOString()}`);
     } catch (error) {
@@ -584,9 +636,45 @@ export class Engine {
     if (pin) await this.refreshUsageSoon(pin.account);
   }
 
+  /**
+   * A turn started. Unless it is this plugin's queued retry, the thread moved on without the retry,
+   * which would now re-run finished work, so the queued row is deleted.
+   */
+  async onThreadActive(threadId: string): Promise<void> {
+    const pending = await this.kv.get<PendingRetry>(key.retry(threadId));
+    if (pending === undefined) return;
+    await this.kv.delete(key.retry(threadId));
+    try {
+      const rows = await this.sdk().threads.queuedMessages.list({ threadId });
+      const row = rows.find((candidate) => candidate.id === pending.queuedMessageId);
+      // Gone or claimed: the turn that started is the retry itself.
+      if (row === undefined || row.state === "claimed") return;
+      await this.sdk().threads.queuedMessages.delete({ threadId, queuedMessageId: row.id });
+    } catch (error) {
+      this.log.warn(`Thread ${threadId}: could not drop the queued retry after the thread moved on: ${errorText(error)}`);
+      return;
+    }
+    await this.recordRetryEnd(threadId, "Dropped the queued retry: the thread started another turn first.");
+  }
+
+  /** The queued retry was deleted by hand. */
+  async onQueuedMessageCancelled(threadId: string, queuedMessageId: string): Promise<void> {
+    const pending = await this.kv.get<PendingRetry>(key.retry(threadId));
+    if (pending?.queuedMessageId !== queuedMessageId) return;
+    await this.kv.delete(key.retry(threadId));
+    await this.recordRetryEnd(threadId, "The queued retry was cancelled by hand.");
+  }
+
+  private async recordRetryEnd(threadId: string, detail: string): Promise<void> {
+    const account = (await this.kv.get<Pin>(key.pin(threadId)))?.account ?? null;
+    await this.recordDecision(threadId, { at: this.now(), account, previous: account, detail, retryAt: null });
+    this.log.info(`Thread ${threadId}: ${detail}`);
+  }
+
   async forgetThread(threadId: string): Promise<void> {
     await this.kv.delete(key.pin(threadId));
     await this.kv.delete(key.decision(threadId));
+    await this.kv.delete(key.retry(threadId));
   }
 
   async setManualPin(threadId: string, account: string): Promise<Pin> {

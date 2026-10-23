@@ -6,7 +6,8 @@ Run your Pi threads on several Claude subscriptions without a proxy.
   of your Claude accounts. New threads go to the largest plan with headroom.
 - **Moves between turns.** When a thread's account is nearly full, or a turn
   fails on a Claude limit, the thread moves to another account at its next
-  turn. A retry is queued for you.
+  turn. A retry is queued for you, and dropped if you continue the thread
+  first.
 - **Usage for every account** in bb's usage card, and in
   `bb claude-accounts status`.
 - **`bb claude-accounts explain`** tells you which account a thread uses and
@@ -17,6 +18,8 @@ Run your Pi threads on several Claude subscriptions without a proxy.
 Each account is a Claude Code config directory signed in through Claude Code's
 own `/login`. For each turn the plugin sets `CLAUDE_CONFIG_DIR` on the `pi`
 provider. The default `~/.claude` login gets no variable and runs as before.
+The plugin learns each turn's model from bb's `message.dispatch` hook, which
+it never uses to hold or reject a message.
 Tokens stay on their machine and are never refreshed or rewritten by the
 plugin.
 

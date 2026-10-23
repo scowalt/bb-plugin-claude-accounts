@@ -43,6 +43,8 @@ export interface Pick {
   ready: boolean;
   /** When the first account frees up, if none has headroom now; null when unknown. */
   readyAt: number | null;
+  /** The account that frees up at `readyAt`, which need not be `account`; null when `readyAt` is. */
+  readyAccount: string | null;
 }
 
 interface Blocker {
@@ -124,12 +126,14 @@ export function pickAccount(input: PickInput): Pick {
 
   if (pinUsable && input.manualPin) {
     const ready = blockers(pinned, family, input.moveLimits, now).length === 0;
+    const readyAt = ready ? null : usableAt(pinned, family, input.moveLimits, now);
     return {
       account: pinned.name,
       reason: "manual",
       detail: `Pinned to ${pinned.name} by hand.`,
       ready,
-      readyAt: ready ? null : usableAt(pinned, family, input.moveLimits, now),
+      readyAt,
+      readyAccount: readyAt === null ? null : pinned.name,
     };
   }
   const pinBlockers = pinUsable ? blockers(pinned, family, input.moveLimits, now) : [];
@@ -140,6 +144,7 @@ export function pickAccount(input: PickInput): Pick {
       detail: `Stays on ${pinned.name}, which is under the move limits.`,
       ready: true,
       readyAt: null,
+      readyAccount: null,
     };
   }
 
@@ -158,6 +163,7 @@ export function pickAccount(input: PickInput): Pick {
         detail: `Starts on ${best.name}, the ${preferSmall ? "smallest" : "largest"} plan with headroom${tight}.`,
         ready: true,
         readyAt: null,
+        readyAccount: null,
       };
     }
     const why =
@@ -172,6 +178,7 @@ export function pickAccount(input: PickInput): Pick {
       detail: `Moves from ${input.pin} (${why}) to ${best.name}${tight}.`,
       ready: true,
       readyAt: null,
+      readyAccount: null,
     };
   }
 
@@ -183,13 +190,16 @@ export function pickAccount(input: PickInput): Pick {
       detail: "No configured account is signed in on this machine.",
       ready: false,
       readyAt: null,
+      readyAccount: null,
     };
   }
   const times = new Map(available.map((candidate) => [candidate.name, usableAt(candidate, family, input.newLimits, now)]));
-  const soonest = [...times.values()].reduce<number | null>(
-    (earliest, at) => (at !== null && (earliest === null || at < earliest) ? at : earliest),
-    null,
-  );
+  // Unknown reset times sort last, so the first account frees up soonest whenever any time is known.
+  const first = [...available].sort(
+    (a, b) => compareNullable(times.get(a.name) ?? null, times.get(b.name) ?? null) || compare(a, b, preferSmall, now),
+  )[0]!;
+  const soonest = times.get(first.name) ?? null;
+  const readyAccount = soonest === null ? null : first.name;
   if (pinUsable) {
     return {
       account: pinned.name,
@@ -197,16 +207,15 @@ export function pickAccount(input: PickInput): Pick {
       detail: `No account has headroom (${pinned.name}: ${describe(pinBlockers)}); stays on ${pinned.name}.`,
       ready: false,
       readyAt: soonest,
+      readyAccount,
     };
   }
-  const first = [...available].sort(
-    (a, b) => compareNullable(times.get(a.name) ?? null, times.get(b.name) ?? null) || compare(a, b, preferSmall, now),
-  )[0]!;
   return {
     account: first.name,
     reason: "waiting",
     detail: `No account has headroom; starts on ${first.name}, which frees up first.`,
     ready: false,
     readyAt: soonest,
+    readyAccount,
   };
 }

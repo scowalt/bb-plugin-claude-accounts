@@ -42,7 +42,8 @@ sets `CLAUDE_CONFIG_DIR` for the thread's account. The machine's default
   resets. A retry is queued 15–45 seconds later on the next account. If no
   account has headroom, the retry waits for the first reset within six hours.
   A turn gets at most four attempts. Provider Retry handles failures that bb
-  itself classified as rate limits.
+  itself classified as rate limits. A queued retry is dropped when the thread
+  starts another turn first, such as when the user continues it by hand.
 - Only accounts signed in on the thread's machine are used.
 - Threads on other models or other providers are left alone.
 

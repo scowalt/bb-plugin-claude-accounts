@@ -18,7 +18,9 @@ Claude Code's own `/login`.
   `pi` provider's environment for the thread. bb resolves that environment on
   every turn, and Pi rebuilds its session when it changes, keeping the
   conversation. The default account gets no variable at all, so threads on it
-  run exactly as before.
+  run exactly as before. bb resolves the environment before it records the
+  turn, so the plugin learns each turn's model from bb's `message.dispatch`
+  hook. The hook only listens: it never holds or rejects a message.
 - **New threads go to the largest plan with headroom.** That means session use
   under 85 % and weekly use under 90 %, counting the weekly allowance for the
   thread's model family (Fable, for example). Among accounts on the same plan,
@@ -31,7 +33,8 @@ Claude Code's own `/login`.
   reports a Claude limit, the plugin blocks that account for the affected
   window until it resets. It then queues a retry 15–45 seconds later on the
   next account. If every account is out of quota, the retry waits for the
-  first reset within six hours.
+  first reset within six hours. If the thread starts another turn first, for
+  example because you continued it yourself, the queued retry is dropped.
 - **Machines are separate.** A thread only uses accounts signed in on its own
   machine.
 - **Usage everywhere.** Each machine's host entry reads its config directories

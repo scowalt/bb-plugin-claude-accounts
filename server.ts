@@ -4,8 +4,9 @@
 // Each account is a Claude Code config directory signed in with `CLAUDE_CONFIG_DIR=<dir> claude`.
 // Every turn, the `pi` provider's environment gets CLAUDE_CONFIG_DIR for the thread's account;
 // the machine's default `~/.claude` gets no variable at all. A Claude limit failure moves the
-// thread to another account and queues a retry. Usage is read on each machine by the host entry
-// and published through bb's provider-usage.v1 contract.
+// thread to another account and queues a retry, which is dropped if the thread starts another
+// turn first. Usage is read on each machine by the host entry and published through bb's
+// provider-usage.v1 contract.
 import { setTimeout as delay } from "node:timers/promises";
 import { PluginCliError, cliCommand, defineCli, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -141,7 +142,19 @@ export default async function plugin(bb: BbPluginApi) {
   await engine.load();
 
   bb.providers.experimental_contributeEnv("pi", (context) => engine.resolveEnv(context));
+  // bb resolves the environment before it writes the turn's request event, so this hook is where the
+  // turn's model is known in time. It only listens: every message proceeds, whatever happens here.
+  bb.experimental_hooks.on("message.dispatch", (context) => {
+    try {
+      engine.noteDispatch(context.thread.id, context.requestedExecution.model);
+    } catch {
+      // Routing falls back to the thread's last request.
+    }
+    return { action: "proceed" };
+  });
   bb.events.on("turn.failed", (event) => engine.onTurnFailed(event));
+  bb.events.on("thread.active", ({ thread }) => engine.onThreadActive(thread.id));
+  bb.events.on("message.cancelled", ({ entry }) => engine.onQueuedMessageCancelled(entry.threadId, entry.id));
   bb.events.on("thread.idle", ({ thread }) => engine.onThreadIdle(thread.id));
   bb.events.on("thread.deleted", ({ thread }) => engine.forgetThread(thread.id));
   settings.onChange(() => {

@@ -86,7 +86,24 @@ describe("pickAccount", () => {
       candidates: [A({ windows: windows(98, 17) }), B({ windows: windows(99, 0) })],
       pin: "A",
     });
-    expect(result).toMatchObject({ account: "A", reason: "waiting", ready: false, readyAt: NOW + 3 * 3_600_000 });
+    expect(result).toMatchObject({
+      account: "A",
+      reason: "waiting",
+      ready: false,
+      readyAt: NOW + 3 * 3_600_000,
+      readyAccount: "A",
+    });
+  });
+
+  it("names the account that frees up first, even when the thread stays on another", () => {
+    const result = pick({
+      candidates: [
+        A({ windows: windows(99, 17).map((window) => (window.kind === "session" ? { ...window, resetsAt: inHours(1) } : window)) }),
+        B({ blockedUntil: NOW + 5 * 3_600_000 }),
+      ],
+      pin: "B",
+    });
+    expect(result).toMatchObject({ account: "B", reason: "waiting", readyAt: NOW + 3_600_000, readyAccount: "A" });
   });
 
   it("starts an unpinned thread on the account that frees up first when all are full", () => {
@@ -100,7 +117,7 @@ describe("pickAccount", () => {
         }),
       ],
     });
-    expect(result).toMatchObject({ account: "B", reason: "waiting", readyAt: NOW + 3_600_000 });
+    expect(result).toMatchObject({ account: "B", reason: "waiting", readyAt: NOW + 3_600_000, readyAccount: "B" });
   });
 
   it("moves only threads of the model family whose weekly allowance is spent", () => {
