@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk";
-import { inspectDirectory, readUsage, type ClaudeHomeDeps } from "./lib/claude-home";
+import { inspectDirectory, readPlan, readUsage, type ClaudeHomeDeps } from "./lib/claude-home";
 import { hostContract } from "./lib/contract";
 
 const run = promisify(execFile);
@@ -57,5 +57,6 @@ export default experimental_defineHostEntry({
       accounts: await Promise.all(directories.map((directory) => inspectDirectory(directory, deps, context.signal))),
     }),
     readUsage: ({ directory }, context) => readUsage(directory, deps, context.signal),
+    readPlan: ({ directory }, context) => readPlan(directory, deps, context.signal),
   },
 });

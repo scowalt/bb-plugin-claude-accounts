@@ -131,6 +131,7 @@ export default async function plugin(bb: BbPluginApi) {
   const host: HostDirectoryClient = {
     inspect: (hostId, directories, signal) => hostClient.call("inspect", { directories }, { hostId, signal }),
     readUsage: (hostId, directory, signal) => hostClient.call("readUsage", { directory }, { hostId, signal }),
+    readPlan: (hostId, directory, signal) => hostClient.call("readPlan", { directory }, { hostId, signal }),
   };
   const engine = new Engine({
     kv: bb.storage.kv,
@@ -306,10 +307,10 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
         refresh: cliCommand({
-          summary: "Re-check every machine's logins and read every account's usage now",
+          summary: "Re-check every machine's logins and read every account's usage and plan now",
           options: { json },
           async run(input) {
-            await engine.refreshAll();
+            await engine.refreshAll(undefined, true);
             const status = await engine.status();
             return { exitCode: 0, stdout: input.options.json ? JSON.stringify(status) : formatStatus(status, Date.now()) };
           },

@@ -28,17 +28,26 @@ interface Usage {
   session: number;
   weekly: number;
   fable?: number;
+  /** Hours until the weekly windows reset; 80 unless set. */
+  weeklyResetsInHours?: number;
+}
+
+/** A plan as Anthropic's profile reports it. */
+interface Plan {
+  subscriptionType: string;
+  rateLimitTier: string;
 }
 
 const inHours = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
 
 function windows(usage: Usage) {
+  const weeklyResetsAt = inHours(usage.weeklyResetsInHours ?? 80);
   return [
     { id: "session", kind: "session", label: "Session", model: null, usedPercent: usage.session, resetsAt: inHours(3) },
-    { id: "weekly", kind: "weekly", label: "Weekly", model: null, usedPercent: usage.weekly, resetsAt: inHours(80) },
+    { id: "weekly", kind: "weekly", label: "Weekly", model: null, usedPercent: usage.weekly, resetsAt: weeklyResetsAt },
     ...(usage.fable === undefined
       ? []
-      : [{ id: "weekly:fable", kind: "weekly", label: "Weekly · Fable", model: "fable", usedPercent: usage.fable, resetsAt: inHours(80) }]),
+      : [{ id: "weekly:fable", kind: "weekly", label: "Weekly · Fable", model: "fable", usedPercent: usage.fable, resetsAt: weeklyResetsAt }]),
   ];
 }
 
@@ -63,12 +72,22 @@ function inspected(directory: string, hostId: string) {
   };
 }
 
-async function setup(options: { settings?: Record<string, unknown> } = {}) {
+async function setup(options: { settings?: Record<string, unknown>; plans?: Record<string, Plan | null> } = {}) {
   const threads = new Map<string, FakeThread>();
   const usage = new Map<string, Usage>([
     ["~/.claude", { session: 40, weekly: 17, fable: 1 }],
     ["~/.claude-b", { session: 2, weekly: 0 }],
   ]);
+  /** What Anthropic's profile reports for each directory's account; null fails the read. */
+  const plans = new Map<string, Plan | null>(
+    Object.entries({
+      "~/.claude": { subscriptionType: "max", rateLimitTier: "default_claude_max_20x" },
+      "~/.claude-b": { subscriptionType: "pro", rateLimitTier: "default_claude_ai" },
+      ...options.plans,
+    }),
+  );
+  const usageReads: string[] = [];
+  const planReads: string[] = [];
   const retries: Array<{ threadId: string; turnRequestId?: string; sendAt?: number; reason?: string }> = [];
   /** Rows in bb's message queue, per thread. */
   const queued = new Map<string, ReturnType<typeof makeQueueEntry>[]>();
@@ -157,6 +176,12 @@ async function setup(options: { settings?: Record<string, unknown> } = {}) {
         };
       }
       const { directory } = input as { directory: string };
+      if (method === "readPlan") {
+        planReads.push(directory);
+        const plan = plans.get(directory);
+        return plan ? { status: "ok", ...plan } : { status: "error", message: "Anthropic returned HTTP 429 for the profile." };
+      }
+      usageReads.push(directory);
       const current = usage.get(directory);
       return current
         ? { status: "ok", observedAt: Date.now(), windows: windows(current) }
@@ -213,7 +238,24 @@ async function setup(options: { settings?: Record<string, unknown> } = {}) {
     });
     return threads.get(threadId)!;
   };
-  return { harness, threads, usage, retries, queued, deletedRows, refresh, env, turn, join, thread, lastRequestId, dispatchHook };
+  return {
+    harness,
+    threads,
+    usage,
+    plans,
+    usageReads,
+    planReads,
+    retries,
+    queued,
+    deletedRows,
+    refresh,
+    env,
+    turn,
+    join,
+    thread,
+    lastRequestId,
+    dispatchHook,
+  };
 }
 
 const B_ENV = [
@@ -580,6 +622,54 @@ describe("claude-accounts", () => {
     const explained = (await harness.behavior.runCli(["explain", "thr_a"])).stdout;
     expect(explained).toContain("is pinned to A since");
     expect(explained).toContain("Unpinned from B by hand");
+  });
+
+  it("ranks accounts by the plan Anthropic reports, not the one their login files kept from sign-in", async () => {
+    const { harness, turn, thread, usage, plans, refresh } = await setup();
+    // B signed in on Pro and has since moved to Max 20x. Its weekly window resets first, so it goes first.
+    plans.set("~/.claude-b", { subscriptionType: "max", rateLimitTier: "default_claude_max_20x" });
+    usage.set("~/.claude-b", { session: 2, weekly: 0, weeklyResetsInHours: 10 });
+    await refresh();
+    expect((await harness.behavior.runCli([])).stdout).toContain("B  ~/.claude-b  b@example.com  Max (20x)");
+    thread("thr_new");
+    expect(await turn("thr_new")).toEqual(B_ENV);
+  });
+
+  it("uses the login files until Anthropic reports a plan, then keeps the last plan it reported", async () => {
+    const { harness, plans, refresh } = await setup({ plans: { "~/.claude-b": null } });
+    const planOfB = async () => (await harness.behavior.runCli([])).stdout.split("\n").find((line) => line.startsWith("B  "));
+    expect(await planOfB()).toContain("Pro");
+    plans.set("~/.claude-b", { subscriptionType: "max", rateLimitTier: "default_claude_max_5x" });
+    await refresh();
+    expect(await planOfB()).toContain("Max (5x)");
+    plans.set("~/.claude-b", null);
+    await refresh();
+    expect(await planOfB()).toContain("Max (5x)");
+  });
+
+  it("reads plans at most hourly in the background, and on every refresh", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const { harness, usageReads, planReads, refresh } = await setup();
+      /** One pass of the usage service. */
+      const poll = async () => {
+        const reads = usageReads.length;
+        const service = harness.behavior.runService("usage");
+        await vi.waitFor(() => expect(usageReads.length).toBe(reads + 2));
+        service.controller.abort();
+        await service.done;
+      };
+      expect(planReads).toHaveLength(2);
+      await poll();
+      expect(planReads).toHaveLength(2);
+      vi.setSystemTime(Date.now() + 61 * 60_000);
+      await poll();
+      expect(planReads).toHaveLength(4);
+      await refresh();
+      expect(planReads).toHaveLength(6);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("publishes every account through provider-usage.v1", async () => {

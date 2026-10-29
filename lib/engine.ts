@@ -17,7 +17,7 @@ import {
   planWeight,
   type AccountSpec,
 } from "./accounts";
-import type { InspectedAccount, InspectResult, UsageRead } from "./contract";
+import type { InspectedAccount, InspectResult, PlanRead, UsageRead } from "./contract";
 import { parseClaudeLimit, type ClaudeLimitFailure } from "./failure";
 import { pickAccount, type Candidate, type Limits, type Pick } from "./policy";
 import { resetsAtMs, type UsageWindow } from "./usage";
@@ -34,6 +34,7 @@ export interface EngineSettings {
 export interface HostDirectoryClient {
   inspect(hostId: string, directories: string[], signal?: AbortSignal): Promise<InspectResult>;
   readUsage(hostId: string, directory: string, signal?: AbortSignal): Promise<UsageRead>;
+  readPlan(hostId: string, directory: string, signal?: AbortSignal): Promise<PlanRead>;
 }
 
 export interface EngineOptions {
@@ -70,6 +71,13 @@ export interface AccountUsage {
   windows: UsageWindow[] | null;
   message: string | null;
   hostId: string | null;
+}
+
+/** The plan Anthropic last reported for an account. */
+export interface AccountPlan {
+  subscriptionType: string;
+  rateLimitTier: string | null;
+  checkedAt: number;
 }
 
 export interface Block {
@@ -138,6 +146,8 @@ const BLOCK_FALLBACK_MS = 60 * 60_000;
 /** How long after a limit failure a usage reading can lift its block; earlier readings may not reflect the failure yet. */
 const BLOCK_RECHECK_MS = 15 * 60_000;
 const REFRESH_DEBOUNCE_MS = 60_000;
+/** How often each account's plan is read again; plans change rarely. */
+const PLAN_REFRESH_MS = 60 * 60_000;
 const INSPECT_DEBOUNCE_MS = 30_000;
 const LOGIN_EXPIRY_WARNING_MS = 7 * 24 * 60 * 60_000;
 /** How long a dispatch's model answers for the environment bb prepares right after it. */
@@ -156,6 +166,7 @@ const key = {
   pin: (threadId: string) => `pin:${threadId}`,
   decision: (threadId: string) => `decision:${threadId}`,
   usage: (account: string) => `usage:${account}`,
+  plan: (account: string) => `plan:${account}`,
   block: (account: string) => `block:${account}`,
   inventory: (hostId: string) => `inventory:${hostId}`,
   retry: (threadId: string) => `retry:${threadId}`,
@@ -180,6 +191,7 @@ export class Engine {
   private readonly random: () => number;
   private readonly inventories = new Map<string, HostInventory>();
   private readonly usage = new Map<string, AccountUsage>();
+  private readonly plans = new Map<string, AccountPlan>();
   private readonly blocks = new Map<string, Block>();
   private readonly inspecting = new Map<string, Promise<void>>();
   private readonly lastInspect = new Map<string, number>();
@@ -196,7 +208,7 @@ export class Engine {
     this.random = options.random ?? Math.random;
   }
 
-  /** Restores the last known inventory, usage, and blocks so a restart routes like before. */
+  /** Restores the last known inventory, usage, plans, and blocks so a restart routes like before. */
   async load(): Promise<void> {
     for (const name of await this.kv.list("inventory:")) {
       const value = await this.kv.get<HostInventory>(name);
@@ -206,13 +218,18 @@ export class Engine {
       const value = await this.kv.get<AccountUsage>(name);
       if (value) this.usage.set(name.slice("usage:".length), value);
     }
+    for (const name of await this.kv.list("plan:")) {
+      const value = await this.kv.get<AccountPlan>(name);
+      if (value) this.plans.set(name.slice("plan:".length), value);
+    }
     for (const name of await this.kv.list("block:")) {
       const value = await this.kv.get<Block>(name);
       if (value) this.blocks.set(name.slice("block:".length), value);
     }
   }
 
-  async refreshAll(signal?: AbortSignal): Promise<void> {
+  /** Re-checks logins and reads usage; plans are read when an hour old, or now with `readPlansNow`. */
+  async refreshAll(signal?: AbortSignal, readPlansNow = false): Promise<void> {
     const settings = await this.settings();
     let hosts: Array<{ id: string; status: string }> = [];
     try {
@@ -225,7 +242,9 @@ export class Engine {
         .filter((host) => host.status !== "disconnected")
         .map((host) => this.inspectHost(host.id, settings, signal)),
     );
-    await Promise.all(settings.accounts.map((spec) => this.refreshUsage(spec, signal)));
+    await Promise.all(
+      settings.accounts.flatMap((spec) => [this.refreshUsage(spec, signal), this.refreshPlan(spec, readPlansNow, signal)]),
+    );
   }
 
   private async inspectHost(hostId: string, settings: EngineSettings, signal?: AbortSignal): Promise<void> {
@@ -317,6 +336,35 @@ export class Engine {
     return work;
   }
 
+  /**
+   * Reads the account's plan from Anthropic once the last reading is an hour old, or now when asked.
+   * The login files keep the plan an account signed in on, so they miss an upgrade until it signs in again.
+   */
+  private async refreshPlan(spec: AccountSpec, readNow: boolean, signal?: AbortSignal): Promise<void> {
+    const last = this.plans.get(spec.name);
+    if (!readNow && last !== undefined && this.now() - last.checkedAt < PLAN_REFRESH_MS) return;
+    const hostId = await this.readHostFor(spec);
+    if (hostId === null) return;
+    let read: PlanRead;
+    try {
+      read = await this.host.readPlan(hostId, spec.directory, signal);
+    } catch (error) {
+      read = { status: "error", message: errorText(error) };
+    }
+    // The last plan Anthropic reported stands until the next good reading, and the login files before the first.
+    if (read.status !== "ok") {
+      if (read.status === "error") this.log.warn(`Could not read account ${spec.name}'s plan: ${read.message}`);
+      return;
+    }
+    const plan: AccountPlan = { subscriptionType: read.subscriptionType, rateLimitTier: read.rateLimitTier, checkedAt: this.now() };
+    const label = planLabel(plan.rateLimitTier, plan.subscriptionType);
+    if (last !== undefined && label !== planLabel(last.rateLimitTier, last.subscriptionType)) {
+      this.log.info(`Account ${spec.name}: Anthropic now reports the ${label} plan.`);
+    }
+    this.plans.set(spec.name, plan);
+    await this.kv.set(key.plan(spec.name), plan);
+  }
+
   private async refreshUsageSoon(account: string): Promise<void> {
     const settings = await this.settings();
     const spec = settings.accounts.find((candidate) => candidate.name === account);
@@ -329,7 +377,7 @@ export class Engine {
     return this.inventories.get(hostId)?.accounts.find((account) => account.directory === spec.directory);
   }
 
-  /** Plan and identity come from whichever machine reported them; the plan is the same everywhere. */
+  /** Identity comes from whichever machine reported it; it is the same everywhere. */
   private identity(spec: AccountSpec): InspectedAccount | undefined {
     let fallback: InspectedAccount | undefined;
     for (const inventory of this.inventories.values()) {
@@ -341,11 +389,19 @@ export class Engine {
     return fallback;
   }
 
+  /** The plan Anthropic last reported for the account, else the one its login files name. */
+  private plan(spec: AccountSpec): { subscriptionType: string | null; rateLimitTier: string | null } {
+    const reported = this.plans.get(spec.name);
+    if (reported !== undefined) return reported;
+    const identity = this.identity(spec);
+    return { subscriptionType: identity?.subscriptionType ?? null, rateLimitTier: identity?.rateLimitTier ?? null };
+  }
+
   private candidates(settings: EngineSettings, hostId: string): Candidate[] {
     const now = this.now();
     return settings.accounts.map((spec) => {
       const inspected = this.inventoryAccount(hostId, spec);
-      const identity = this.identity(spec);
+      const plan = this.plan(spec);
       const block = this.blocks.get(spec.name);
       const loginLive =
         inspected?.refreshTokenExpiresAt === null ||
@@ -354,7 +410,7 @@ export class Engine {
       return {
         name: spec.name,
         order: spec.order,
-        weight: planWeight(identity?.rateLimitTier ?? null, identity?.subscriptionType ?? null),
+        weight: planWeight(plan.rateLimitTier, plan.subscriptionType),
         available: Boolean(inspected?.exists && inspected.signedIn && loginLive),
         windows: this.usage.get(spec.name)?.windows ?? null,
         blockedUntil: block?.until ?? null,
@@ -798,6 +854,7 @@ export class Engine {
     const warnings: string[] = [];
     const accounts = settings.accounts.map((spec): AccountStatus => {
       const identity = this.identity(spec);
+      const plan = this.plan(spec);
       const machines: MachineStatus[] = [...this.inventories.values()].map((inventory) => {
         const account = inventory.accounts.find((candidate) => candidate.directory === spec.directory);
         return {
@@ -829,8 +886,8 @@ export class Engine {
         email: identity?.email ?? null,
         accountUuid: identity?.accountUuid ?? null,
         organizationUuid: identity?.organizationUuid ?? null,
-        plan: planLabel(identity?.rateLimitTier ?? null, identity?.subscriptionType ?? null),
-        weight: planWeight(identity?.rateLimitTier ?? null, identity?.subscriptionType ?? null),
+        plan: planLabel(plan.rateLimitTier, plan.subscriptionType),
+        weight: planWeight(plan.rateLimitTier, plan.subscriptionType),
         machines,
         usage: this.usage.get(spec.name) ?? null,
         blockedUntil: block?.until !== null && block?.until !== undefined && block.until > now ? block.until : null,
@@ -861,13 +918,14 @@ export class Engine {
     const settings = await this.settings();
     return settings.accounts.map((spec) => {
       const identity = this.identity(spec);
+      const plan = this.plan(spec);
       return {
         spec,
         accountKey: identity?.accountUuid ? `anthropic:account:${identity.accountUuid}` : null,
         email: identity?.email ?? null,
-        plan: planLabel(identity?.rateLimitTier ?? null, identity?.subscriptionType ?? null),
-        subscriptionType: identity?.subscriptionType ?? null,
-        multiplier: Number(/max_(\d+)x/u.exec(identity?.rateLimitTier ?? "")?.[1]) || null,
+        plan: planLabel(plan.rateLimitTier, plan.subscriptionType),
+        subscriptionType: plan.subscriptionType,
+        multiplier: Number(/max_(\d+)x/u.exec(plan.rateLimitTier ?? "")?.[1]) || null,
         usage: this.usage.get(spec.name) ?? null,
       };
     });

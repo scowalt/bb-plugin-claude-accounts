@@ -1,4 +1,4 @@
-// The host RPC contract the server calls on each machine. Tokens never cross it: the host reads usage and returns numbers.
+// The host RPC contract the server calls on each machine. Tokens never cross it: the host reads usage and plans and returns them.
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { usageWindowSchema } from "./usage";
@@ -41,6 +41,12 @@ export const usageReadSchema = z.discriminatedUnion("status", [
 ]);
 export type UsageRead = z.infer<typeof usageReadSchema>;
 
+export const planReadSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("ok"), subscriptionType: z.string(), rateLimitTier: z.string().nullable() }).strict(),
+  z.object({ status: z.enum(["expired", "signed-out", "error"]), message: z.string() }).strict(),
+]);
+export type PlanRead = z.infer<typeof planReadSchema>;
+
 export const hostContract = defineRpcContract({
   inspect: {
     input: z.object({ directories: z.array(directorySchema).min(1).max(16) }).strict(),
@@ -49,5 +55,9 @@ export const hostContract = defineRpcContract({
   readUsage: {
     input: z.object({ directory: directorySchema }).strict(),
     output: usageReadSchema,
+  },
+  readPlan: {
+    input: z.object({ directory: directorySchema }).strict(),
+    output: planReadSchema,
   },
 });

@@ -45,6 +45,11 @@ Claude Code's own `/login`.
   never leave the machine, and the plugin never refreshes or rewrites them.
   Every account appears as a "Claude Accounts" group in bb's usage card,
   through the `provider-usage.v1` contract.
+- **Plans come from Anthropic.** A login's files keep the plan it signed in on,
+  so after an upgrade they still name the old plan. The plugin reads each
+  account's plan from Anthropic's profile endpoint, as Claude Code does, at
+  most once an hour and on every `bb claude-accounts refresh`. Until the first
+  reading succeeds, the login files decide.
 
 ## Set up
 
@@ -81,7 +86,7 @@ and pi-claude-bridge 0.9.3.
 | `bb claude-accounts explain [thread] [--json]` | A thread's pin, last decision, queued retry, and next pick |
 | `bb claude-accounts pin <thread> <account>` | Pin a thread by hand, from its next turn |
 | `bb claude-accounts unpin <thread>` | Let the rules pick again |
-| `bb claude-accounts refresh [--json]` | Re-check logins and read usage now |
+| `bb claude-accounts refresh [--json]` | Re-check logins and read usage and plans now |
 
 ## Settings
 

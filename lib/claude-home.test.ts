@@ -1,4 +1,4 @@
-import { inspectDirectory, keychainService, readUsage, resolveDirectory, type ClaudeHomeDeps } from "./claude-home";
+import { inspectDirectory, keychainService, readPlan, readUsage, resolveDirectory, type ClaudeHomeDeps } from "./claude-home";
 import { maxResponse } from "./fixtures";
 
 const NOW = Date.parse("2026-10-23T14:00:00Z");
@@ -162,5 +162,52 @@ describe("readUsage", () => {
     const { deps } = fakeMachine(machine, { fetch: async () => new Response("no", { status: 401 }) });
     expect(await readUsage("~/.claude", deps)).toMatchObject({ status: "expired" });
     expect(await readUsage("~/.claude-z", deps)).toMatchObject({ status: "signed-out" });
+  });
+});
+
+/** Trimmed from Anthropic's OAuth profile response, the shape Claude Code 2.1.312 checks. */
+const profile = {
+  account: { uuid: "uuid-b", email: "b@example.com" },
+  organization: { uuid: "org-uuid-b", organization_type: "claude_max", rate_limit_tier: "default_claude_max_20x" },
+};
+
+function answering(body: unknown) {
+  const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+  const fetch: ClaudeHomeDeps["fetch"] = async (url, init) => {
+    requests.push({ url: String(url), headers: init?.headers as Record<string, string> });
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  return { fetch, requests };
+}
+
+describe("readPlan", () => {
+  it("reads the plan from Anthropic's profile with the directory's own token", async () => {
+    const { fetch, requests } = answering(profile);
+    const { deps } = fakeMachine(machine, { fetch });
+    // B's login files still name the Pro plan it signed in on.
+    expect(await readPlan("~/.claude-b", deps)).toEqual({
+      status: "ok",
+      subscriptionType: "max",
+      rateLimitTier: "default_claude_max_20x",
+    });
+    expect(requests.map((request) => [request.url, request.headers.Authorization])).toEqual([
+      ["https://api.anthropic.com/api/oauth/profile", "Bearer token-b"],
+    ]);
+  });
+
+  it("reports a profile that names no plan it knows", async () => {
+    const { fetch } = answering({ ...profile, organization: { uuid: "org-uuid-b", organization_type: "api_individual" } });
+    const { deps } = fakeMachine(machine, { fetch });
+    expect(await readPlan("~/.claude-b", deps)).toMatchObject({ status: "error" });
+  });
+
+  it("does not send an expired token, and reports a missing login", async () => {
+    const { deps, requests } = fakeMachine({
+      ...machine,
+      [`${HOME}/.claude-b/.credentials.json`]: credentials({ expiresAt: NOW - 1 }),
+    });
+    expect(await readPlan("~/.claude-b", deps)).toMatchObject({ status: "expired" });
+    expect(await readPlan("~/.claude-z", deps)).toMatchObject({ status: "signed-out" });
+    expect(requests).toHaveLength(0);
   });
 });

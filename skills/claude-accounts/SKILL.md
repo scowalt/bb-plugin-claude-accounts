@@ -26,7 +26,8 @@ sets `CLAUDE_CONFIG_DIR` for the thread's account. The machine's default
   over its limits.
 - `bb claude-accounts unpin <thread-id>` — let the rules pick again.
 - `bb claude-accounts refresh [--json]` — re-check every machine's logins and
-  read every account's usage now, then print the status.
+  read every account's usage and plan now, then print the status. Plans come
+  from Anthropic, because a login's files keep the plan it signed in on.
 
 ## Rules
 
