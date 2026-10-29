@@ -189,6 +189,17 @@ async function setup(options: { settings?: Record<string, unknown> } = {}) {
     fake.completedTurns += 1;
     return resolved;
   };
+  /** A message joining the thread's running turn, such as a steer or a delivered tool result. */
+  const join = async (threadId: string) => {
+    const fake = threads.get(threadId)!;
+    const model = fake.requests.at(-1)?.model ?? fake.model;
+    await dispatchHook()(
+      makeMessageDispatchHookContext({ thread: { id: threadId }, requestedExecution: { model }, attempt: "join-turn" }),
+    );
+    const resolved = await env(threadId);
+    fake.requests.push({ requestId: `req_${threadId}_${fake.requests.length + 1}`, model });
+    return resolved;
+  };
   const lastRequestId = (threadId: string) => threads.get(threadId)!.requests.at(-1)!.requestId;
   /** A thread with `turns` finished turns on `model`, from before this test looked at it. */
   const thread = (threadId: string, model = OPUS, options: { turns?: number; sourceThreadId?: string } = {}) => {
@@ -202,7 +213,7 @@ async function setup(options: { settings?: Record<string, unknown> } = {}) {
     });
     return threads.get(threadId)!;
   };
-  return { harness, threads, usage, retries, queued, deletedRows, refresh, env, turn, thread, lastRequestId, dispatchHook };
+  return { harness, threads, usage, retries, queued, deletedRows, refresh, env, turn, join, thread, lastRequestId, dispatchHook };
 }
 
 const B_ENV = [
@@ -352,6 +363,42 @@ describe("claude-accounts", () => {
     expect(explained.stdout).toContain("pinned to B");
     expect(explained.stdout).toContain("A retry runs in");
     expect(await turn("thr_a")).toEqual(B_ENV);
+  });
+
+  it("keeps a running turn on its account when a message joins it, so the turn's limit failure moves it", async () => {
+    const { harness, turn, join, thread, usage, refresh, retries, lastRequestId } = await setup();
+    const one = thread("thr_one");
+    const two = thread("thr_two");
+    // Both turns start on A and are still running when A crosses the move limit.
+    expect(await turn("thr_one")).toEqual([]);
+    expect(await turn("thr_two")).toEqual([]);
+    usage.set("~/.claude", { session: 98, weekly: 17 });
+    await refresh();
+    const joined = await join("thr_one");
+    // A runs out under both turns.
+    const limit = "Claude quota exceeded — rate limit (five_hour) — resets 7:00:00 PM: You've hit your session limit";
+    one.errors = [limit];
+    two.errors = [limit];
+    const before = Date.now();
+    for (const threadId of ["thr_one", "thr_two"]) {
+      await harness.behavior.emitThreadEvent(
+        "turn.failed",
+        makeTurnFailedEvent({ threadId, requestId: lastRequestId(threadId), errorInfo: null, attemptNumber: 1 }),
+      );
+    }
+    const status = JSON.parse((await harness.behavior.runCli(["status", "--json"])).stdout) as {
+      accounts: Array<{ name: string; blockedUntil: number | null }>;
+    };
+    expect(status.accounts.map((account) => [account.name, account.blockedUntil !== null])).toEqual([
+      ["A", true],
+      ["B", false],
+    ]);
+    expect(retries.map((retry) => [retry.threadId, retry.reason])).toEqual([
+      ["thr_one", "Claude Accounts: A hit its session limit; retrying on B"],
+      ["thr_two", "Claude Accounts: A hit its session limit; retrying on B"],
+    ]);
+    for (const retry of retries) expect(retry.sendAt! - before).toBeLessThan(46_000);
+    expect(joined).toEqual([]);
   });
 
   it("names the account that frees up first when every account is out of quota", async () => {

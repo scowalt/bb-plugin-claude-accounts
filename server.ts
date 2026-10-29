@@ -143,10 +143,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.providers.experimental_contributeEnv("pi", (context) => engine.resolveEnv(context));
   // bb resolves the environment before it writes the turn's request event, so this hook is where the
-  // turn's model is known in time. It only listens: every message proceeds, whatever happens here.
+  // turn's model, and whether the message joins a running turn, are known in time. It only listens:
+  // every message proceeds, whatever happens here.
   bb.experimental_hooks.on("message.dispatch", (context) => {
     try {
-      engine.noteDispatch(context.thread.id, context.requestedExecution.model);
+      engine.noteDispatch(context.thread.id, context.requestedExecution.model, context.attempt);
     } catch {
       // Routing falls back to the thread's last request.
     }

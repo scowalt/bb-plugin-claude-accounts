@@ -99,7 +99,9 @@ and pi-claude-bridge 0.9.3.
 ## Limits
 
 - **Switches happen between turns, not inside one.** When an account runs out
-  mid-turn, the turn fails once and is retried on the next account.
+  mid-turn, the turn fails once and is retried on the next account. A message
+  that joins a running turn, such as a steer or a delivered tool result, stays
+  on the turn's account.
 - **Idle accounts show their last reading.** An account no thread has used for
   about 8 hours has an expired access token. It shows its last usage reading
   until a thread uses it again; the plugin never refreshes the token itself.

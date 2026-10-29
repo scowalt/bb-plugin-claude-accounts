@@ -184,7 +184,7 @@ export class Engine {
   private readonly inspecting = new Map<string, Promise<void>>();
   private readonly lastInspect = new Map<string, number>();
   private readonly reading = new Map<string, Promise<void>>();
-  private readonly dispatches = new Map<string, { model: string | null; at: number }>();
+  private readonly dispatches = new Map<string, { model: string | null; joinsTurn: boolean; at: number }>();
 
   constructor(options: EngineOptions) {
     this.kv = options.kv;
@@ -473,21 +473,27 @@ export class Engine {
 
   /**
    * From the `message.dispatch` hook, which bb runs before it prepares a turn: the model that turn
-   * runs on. bb writes the turn's request event only after it resolves the provider environment, so
-   * this is the only current answer while the environment is resolved. Never throws.
+   * runs on, and whether the message starts a turn or joins a running one. bb writes the turn's
+   * request event only after it resolves the provider environment, so this is the only current
+   * answer while the environment is resolved. Never throws.
    */
-  noteDispatch(threadId: string, model: string | null): void {
+  noteDispatch(threadId: string, model: string | null, attempt: "start-turn" | "join-turn"): void {
     const now = this.now();
     for (const [id, note] of this.dispatches) {
       if (now - note.at > DISPATCH_MODEL_TTL_MS) this.dispatches.delete(id);
     }
-    this.dispatches.set(threadId, { model, at: now });
+    this.dispatches.set(threadId, { model, joinsTurn: attempt === "join-turn", at: now });
+  }
+
+  private freshDispatch(threadId: string) {
+    const note = this.dispatches.get(threadId);
+    return note !== undefined && this.now() - note.at <= DISPATCH_MODEL_TTL_MS ? note : null;
   }
 
   /** The model of the turn bb is preparing: the dispatch hook's note when fresh, else the last request bb wrote. */
   private async turnModel(threadId: string): Promise<string | null> {
-    const note = this.dispatches.get(threadId);
-    if (note !== undefined && this.now() - note.at <= DISPATCH_MODEL_TTL_MS) return note.model;
+    const note = this.freshDispatch(threadId);
+    if (note !== null) return note.model;
     return (await this.latestRequest(threadId))?.model ?? null;
   }
 
@@ -519,9 +525,14 @@ export class Engine {
         return [];
       }
       const settings = await this.settings();
-      const pick = await this.decide(threadId, context.hostId, model, settings, () => this.hasEarlierTurn(threadId));
-      if (settings.mode !== "route" || pick.account === null) return [];
-      const spec = settings.accounts.find((candidate) => candidate.name === pick.account);
+      // A message that joins a running turn, such as a steer or a delivered tool result, reaches the
+      // Claude Code process that turn started, which keeps its login. Picking again would move the pin
+      // off the account the turn runs on, and the turn's limit failure would block the wrong account.
+      const account = this.freshDispatch(threadId)?.joinsTurn
+        ? ((await this.kv.get<Pin>(key.pin(threadId)))?.account ?? null)
+        : (await this.decide(threadId, context.hostId, model, settings, () => this.hasEarlierTurn(threadId))).account;
+      if (settings.mode !== "route" || account === null) return [];
+      const spec = settings.accounts.find((candidate) => candidate.name === account);
       return spec ? this.envFor(spec, this.inventoryAccount(context.hostId, spec)) : [];
     } catch (error) {
       this.log.warn(`Leaving thread ${context.threadId} on its default login: ${errorText(error)}`);
