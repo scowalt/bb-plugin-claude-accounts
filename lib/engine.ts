@@ -75,6 +75,8 @@ export interface AccountUsage {
 export interface Block {
   until: number | null;
   families: Record<string, number>;
+  /** When the last limit failure set the block; missing on blocks stored before it was recorded. */
+  at?: number;
 }
 
 /** A retry this plugin queued through bb, kept so it can be dropped if the thread moves on first. */
@@ -133,6 +135,8 @@ export interface Explanation {
 const MAX_RETRY_ATTEMPTS = 4;
 const MAX_RETRY_WAIT_MS = 6 * 60 * 60_000;
 const BLOCK_FALLBACK_MS = 60 * 60_000;
+/** How long after a limit failure a usage reading can lift its block; earlier readings may not reflect the failure yet. */
+const BLOCK_RECHECK_MS = 15 * 60_000;
 const REFRESH_DEBOUNCE_MS = 60_000;
 const INSPECT_DEBOUNCE_MS = 30_000;
 const LOGIN_EXPIRY_WARNING_MS = 7 * 24 * 60 * 60_000;
@@ -307,6 +311,7 @@ export class Engine {
       }
       this.usage.set(spec.name, next);
       await this.kv.set(key.usage(spec.name), next);
+      await this.liftBlock(spec.name, next);
     })().finally(() => this.reading.delete(spec.name));
     this.reading.set(spec.name, work);
     return work;
@@ -564,11 +569,41 @@ export class Engine {
     const current = this.blocks.get(account) ?? { until: null, families: {} };
     const next: Block =
       failure.scope === "family" && failure.family !== null
-        ? { ...current, families: { ...current.families, [failure.family]: until } }
-        : { ...current, until: Math.max(current.until ?? 0, until) };
+        ? { ...current, families: { ...current.families, [failure.family]: until }, at: this.now() }
+        : { ...current, until: Math.max(current.until ?? 0, until), at: this.now() };
     this.blocks.set(account, next);
     await this.kv.set(key.block(account), next);
     return until;
+  }
+
+  /**
+   * Lifts a limit-failure block once a usage reading taken well after the failure covers the blocked
+   * window. Anthropic sometimes rejects an account briefly while its windows have room; the windows
+   * still hold the account back when it is really full, so the block need not last until the reset.
+   */
+  private async liftBlock(account: string, usage: AccountUsage): Promise<void> {
+    const block = this.blocks.get(account);
+    const windows = usage.windows;
+    if (!block || usage.status !== "ok" || usage.observedAt === null || windows === null) return;
+    if (usage.observedAt < (block.at ?? 0) + BLOCK_RECHECK_MS) return;
+    const covers = (kind: "session" | "weekly", model: string | null) =>
+      windows.some((window) => window.kind === kind && window.model === model);
+    const until = block.until !== null && covers("session", null) && covers("weekly", null) ? null : block.until;
+    const families = Object.fromEntries(Object.entries(block.families).filter(([family]) => !covers("weekly", family)));
+    const lifted = [
+      ...(until !== block.until ? ["all models"] : []),
+      ...Object.keys(block.families).filter((family) => !(family in families)),
+    ];
+    if (lifted.length === 0) return;
+    if (until === null && Object.keys(families).length === 0) {
+      this.blocks.delete(account);
+      await this.kv.delete(key.block(account));
+    } else {
+      const next: Block = { ...block, until, families };
+      this.blocks.set(account, next);
+      await this.kv.set(key.block(account), next);
+    }
+    this.log.info(`Account ${account}: lifted its limit-failure block (${lifted.join(", ")}); a later usage reading decides from here.`);
   }
 
   async onTurnFailed(event: PluginTurnFailedEvent): Promise<void> {

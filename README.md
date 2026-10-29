@@ -31,7 +31,10 @@ Claude Code's own `/login`.
   the new account uncached.
 - **Limit failures move the thread and queue a retry.** When claude-bridge
   reports a Claude limit, the plugin blocks that account for the affected
-  window until it resets. It then queues a retry 15–45 seconds later on the
+  window until it resets, or until a usage reading at least 15 minutes later
+  covers that window. From then on the reading decides, so a brief rejection
+  does not keep an account with room out of use. It then queues a retry
+  15–45 seconds later on the
   next account. If every account is out of quota, the retry waits for the
   first reset within six hours. If the thread starts another turn first, for
   example because you continued it yourself, the queued retry is dropped.

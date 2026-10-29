@@ -389,6 +389,56 @@ describe("claude-accounts", () => {
     expect(explained).not.toContain("A retry runs in");
   });
 
+  it("lifts a limit-failure block once a usage reading well after the failure shows room", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const { harness, turn, thread, usage, refresh, lastRequestId } = await setup();
+      usage.set("~/.claude", { session: 99, weekly: 17 });
+      await refresh();
+      const fake = thread("thr_b");
+      expect(await turn("thr_b")).toEqual(B_ENV);
+      fake.errors = ["Claude quota exceeded — rate limit (five_hour) — resets 8:10:00 PM: You've hit your session limit"];
+      await harness.behavior.emitThreadEvent(
+        "turn.failed",
+        makeTurnFailedEvent({ threadId: "thr_b", requestId: lastRequestId("thr_b"), errorInfo: null, attemptNumber: 1 }),
+      );
+      const blocked = async () => (await harness.behavior.runCli([])).stdout.includes("Blocked after a limit failure");
+      await refresh();
+      expect(await blocked()).toBe(true);
+      vi.setSystemTime(Date.now() + 16 * 60_000);
+      await refresh();
+      expect(await blocked()).toBe(false);
+      thread("thr_new");
+      expect(await turn("thr_new")).toEqual(B_ENV);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still keeps an account out when the reading that lifts its block shows the window full", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const { harness, turn, thread, usage, refresh, lastRequestId } = await setup();
+      usage.set("~/.claude", { session: 99, weekly: 17 });
+      await refresh();
+      const fake = thread("thr_b");
+      expect(await turn("thr_b")).toEqual(B_ENV);
+      fake.errors = ["Claude quota exceeded — rate limit (five_hour) — resets 8:10:00 PM: You've hit your session limit"];
+      await harness.behavior.emitThreadEvent(
+        "turn.failed",
+        makeTurnFailedEvent({ threadId: "thr_b", requestId: lastRequestId("thr_b"), errorInfo: null, attemptNumber: 1 }),
+      );
+      usage.set("~/.claude-b", { session: 100, weekly: 3 });
+      vi.setSystemTime(Date.now() + 16 * 60_000);
+      await refresh();
+      thread("thr_new");
+      expect(await turn("thr_new")).not.toEqual(B_ENV);
+      expect((await harness.behavior.runCli(["explain", "thr_new"])).stdout).toContain("No account has headroom");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("leaves its retry alone when the turn that starts is the retry itself", async () => {
     const { harness, turn, thread, queued, deletedRows, lastRequestId } = await setup();
     const fake = thread("thr_a");

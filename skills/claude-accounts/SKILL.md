@@ -39,7 +39,8 @@ sets `CLAUDE_CONFIG_DIR` for the thread's account. The machine's default
   next turn. The move re-sends the thread's context to the new account
   uncached, because prompt caches do not carry across accounts.
 - A Claude limit failure blocks that account for the affected window until it
-  resets. A retry is queued 15–45 seconds later on the next account. If no
+  resets, or until a usage reading at least 15 minutes later covers that
+  window; the reading's percentages decide from then on. A retry is queued 15–45 seconds later on the next account. If no
   account has headroom, the retry waits for the first reset within six hours.
   A turn gets at most four attempts. Provider Retry handles failures that bb
   itself classified as rate limits. A queued retry is dropped when the thread
