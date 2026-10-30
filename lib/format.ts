@@ -36,7 +36,7 @@ export function formatStatus(status: EngineStatus, now: number): string {
   for (const account of status.accounts) {
     lines.push("");
     const plan = account.plan ?? "plan unknown";
-    lines.push(`${account.name}  ${account.directory}  ${account.email ?? "email unknown"}  ${plan}  · ${account.pinnedThreads} thread(s) pinned`);
+    lines.push(`${account.name}  ${account.directory}  ${account.email ?? "email unknown"}  ${plan}  · ${account.pinnedThreads} thread(s) pinned${account.discovered ? "  · discovered" : ""}`);
     const machines = account.machines
       .map((machine) => `${machine.hostName} ${machine.signedIn ? "signed in" : "not signed in"}${machine.error ? ` (${machine.error})` : ""}`)
       .join(", ");
@@ -58,6 +58,26 @@ export function formatStatus(status: EngineStatus, now: number): string {
   if (status.warnings.length > 0) {
     lines.push("", "Warnings:", ...status.warnings.map((warning) => `  - ${warning}`));
   }
+  return lines.join("\n");
+}
+
+const SOURCE_ORDER: Array<"setting" | "discovered"> = ["setting", "discovered"];
+
+/** `bb claude-accounts accounts`: every account in use and where it came from. */
+export function formatAccounts(status: EngineStatus): string {
+  const lines: string[] = [];
+  for (const source of SOURCE_ORDER) {
+    const accounts = status.accounts.filter((account) => account.discovered === (source === "discovered"));
+    if (accounts.length === 0) continue;
+    lines.push(source === "setting" ? "Named in the accounts setting:" : "Found on a machine, not named in the setting:");
+    for (const account of accounts) {
+      lines.push(`  ${account.name}  ${account.directory}  ${account.email ?? "email unknown"}  ${account.plan ?? "plan unknown"}`);
+    }
+    lines.push("");
+  }
+  lines.push(
+    "A signed-in ~/.claude-* directory joins the rotation on its own. Name one in the accounts setting to control its letter or keep it on a machine without it.",
+  );
   return lines.join("\n");
 }
 

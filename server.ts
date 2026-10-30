@@ -13,7 +13,7 @@ import { z } from "zod";
 import { parseAccounts, parseModelPatterns, type AccountSpec } from "./lib/accounts";
 import { hostContract } from "./lib/contract";
 import { Engine, type EngineSettings, type HostDirectoryClient } from "./lib/engine";
-import { formatExplanation, formatStatus } from "./lib/format";
+import { formatAccounts, formatExplanation, formatStatus } from "./lib/format";
 import { retryAvailabilityContract, retryAvailabilityMethod } from "./lib/retry-contract";
 import {
   usageFetchMethod,
@@ -194,7 +194,8 @@ export default async function plugin(bb: BbPluginApi) {
         };
       },
       async [usageFetchMethod]({ resourceId, refresh }): Promise<UsageMeasurement> {
-        const spec = (await engineSettings()).accounts.find((candidate) => candidate.name === resourceId);
+        // Discovered accounts are part of the rotation too, so they must be readable here as well.
+        const spec = (await engine.settingsView()).accounts.find((candidate) => candidate.name === resourceId);
         if (!spec) throw new Error("Usage resource no longer exists.");
         if (refresh) await engine.refreshUsage(spec);
         const resource = (await engine.usageResources()).find((candidate) => candidate.spec.name === resourceId);
@@ -255,6 +256,14 @@ export default async function plugin(bb: BbPluginApi) {
       root: statusCommand(),
       commands: {
         status: statusCommand(),
+        accounts: cliCommand({
+          summary: "List every account in use, including directories a machine discovered",
+          options: { json },
+          async run(input) {
+            const status = await engine.status();
+            return { exitCode: 0, stdout: input.options.json ? JSON.stringify(status.accounts) : formatAccounts(status) };
+          },
+        }),
         explain: cliCommand({
           summary: "Explain which account a thread uses, why, and what its next turn would pick",
           positionals: [{ name: "thread", description: "Thread id; defaults to the current thread" }],

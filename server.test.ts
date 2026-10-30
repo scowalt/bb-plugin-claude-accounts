@@ -51,20 +51,24 @@ function windows(usage: Usage) {
   ];
 }
 
+const DISCOVERED = /^~\/\.claude-([^/]+)$/u;
+
 function inspected(directory: string, hostId: string) {
   const home = hostId === MACBOOK ? "/Users/u" : "/home/u";
   const isDefault = directory === "~/.claude";
+  const suffix = DISCOVERED.exec(directory)?.[1];
   const path = `${home}/${directory.slice(2)}`;
   const signedIn = isDefault || hostId === BEELINK;
+  const who = suffix ?? (isDefault ? "a" : "b");
   return {
     directory,
     path,
     isDefault,
     exists: signedIn,
     signedIn,
-    accountUuid: isDefault ? "uuid-a" : "uuid-b",
-    organizationUuid: isDefault ? "org-a" : "org-b",
-    email: isDefault ? "a@example.com" : "b@example.com",
+    accountUuid: `uuid-${who}`,
+    organizationUuid: `org-${who}`,
+    email: `${who}@example.com`,
     subscriptionType: isDefault ? "max" : "pro",
     rateLimitTier: isDefault ? "default_claude_max_20x" : "default_claude_ai",
     refreshTokenExpiresAt: Date.now() + 20 * 86_400_000,
@@ -72,7 +76,15 @@ function inspected(directory: string, hostId: string) {
   };
 }
 
-async function setup(options: { settings?: Record<string, unknown>; plans?: Record<string, Plan | null> } = {}) {
+async function setup(
+  options: {
+    settings?: Record<string, unknown>;
+    plans?: Record<string, Plan | null>;
+    /** Directories discovery reports, on the machine(s) named by `on`. */
+    discovered?: Array<{ directory: string; signedIn?: boolean; on?: string }>;
+    extraUsage?: Record<string, Usage>;
+  } = {},
+) {
   const threads = new Map<string, FakeThread>();
   const usage = new Map<string, Usage>([
     ["~/.claude", { session: 40, weekly: 17, fable: 1 }],
@@ -92,6 +104,7 @@ async function setup(options: { settings?: Record<string, unknown>; plans?: Reco
   /** Rows in bb's message queue, per thread. */
   const queued = new Map<string, ReturnType<typeof makeQueueEntry>[]>();
   const deletedRows: string[] = [];
+  for (const [directory, entry] of Object.entries(options.extraUsage ?? {})) usage.set(directory, entry);
   const row = (seq: number, type: string, data: unknown, threadId: string) => ({
     id: `evt_${seq}`,
     scope: { kind: "thread" },
@@ -173,6 +186,17 @@ async function setup(options: { settings?: Record<string, unknown>; plans?: Reco
           home: hostId === MACBOOK ? "/Users/u" : "/home/u",
           platform: hostId === MACBOOK ? "darwin" : "linux",
           accounts: directories.map((directory) => inspected(directory, hostId)),
+          discovered: (options.discovered ?? [])
+            .filter((entry) => (entry.on ?? BEELINK) === hostId)
+            .map((entry) => ({ directory: entry.directory, isDefault: false, signedIn: entry.signedIn ?? true })),
+        };
+      }
+      if (method === "discover") {
+        return {
+          home: hostId === MACBOOK ? "/Users/u" : "/home/u",
+          directories: (options.discovered ?? [])
+            .filter((entry) => (entry.on ?? BEELINK) === hostId && (entry.signedIn ?? true))
+            .map((entry) => entry.directory),
         };
       }
       const { directory } = input as { directory: string };
@@ -691,6 +715,79 @@ describe("claude-accounts", () => {
       ["weekly", "Weekly limit", 17],
       ["weekly", "Weekly · Fable", 1],
     ]);
+  });
+
+  it("adds a signed-in directory the setting does not name", async () => {
+    const { harness, refresh } = await setup({
+      discovered: [{ directory: "~/.claude-c" }],
+      extraUsage: { "~/.claude-c": { session: 1, weekly: 0 } },
+      plans: { "~/.claude-c": { subscriptionType: "max", rateLimitTier: "default_claude_max_5x" } },
+    });
+    await refresh();
+    const { stdout } = await harness.behavior.runCli([]);
+    expect(stdout).toContain("C  ~/.claude-c  c@example.com  Max (5x)");
+    expect(stdout).toContain("discovered");
+  });
+
+  it("serves a discovered account through provider-usage.v1", async () => {
+    const { harness, refresh } = await setup({
+      discovered: [{ directory: "~/.claude-c" }],
+      extraUsage: { "~/.claude-c": { session: 5, weekly: 2 } },
+      plans: { "~/.claude-c": { subscriptionType: "max", rateLimitTier: "default_claude_max_5x" } },
+    });
+    await refresh();
+    const listed = (await harness.behavior.callRpc("provider-usage.v1.listResources", {})) as {
+      resources: Array<{ id: string; label: string }>;
+    };
+    expect(listed.resources.map((resource) => resource.id)).toEqual(["A", "B", "C"]);
+    expect(listed.resources.find((resource) => resource.id === "C")?.label).toBe("c@example.com");
+
+    // A discovered account must read back too, not fail with "no longer exists".
+    const measurement = (await harness.behavior.callRpc("provider-usage.v1.getResource", { resourceId: "C", refresh: true })) as {
+      usage: { status: string; planLabel: string; windows: Array<{ label: string; usedPercent: number }> };
+    };
+    expect(measurement.usage.status).toBe("ok");
+    expect(measurement.usage.planLabel).toBe("Max (5x)");
+    expect(measurement.usage.windows.map((window) => [window.label, window.usedPercent])).toEqual([
+      ["Current session", 5],
+      ["Weekly limit", 2],
+    ]);
+  });
+
+  it("ignores a discovered directory with no login", async () => {
+    const { harness, refresh } = await setup({ discovered: [{ directory: "~/.claude-c", signedIn: false }] });
+    await refresh();
+    const { stdout } = await harness.behavior.runCli([]);
+    expect(stdout).not.toContain("~/.claude-c");
+  });
+
+  it("lists accounts by where they came from", async () => {
+    const { harness, refresh } = await setup({ discovered: [{ directory: "~/.claude-c" }] });
+    await refresh();
+    const { stdout } = await harness.behavior.runCli(["accounts"]);
+    expect(stdout).toContain("Named in the accounts setting:");
+    expect(stdout).toContain("A  ~/.claude  a@example.com");
+    expect(stdout).toContain("Found on a machine, not named in the setting:");
+    expect(stdout).toContain("C  ~/.claude-c  c@example.com");
+  });
+
+  it("moves a thread onto a discovered account when every named account is past the move limits", async () => {
+    const { harness, refresh, turn, thread, usage } = await setup({
+      discovered: [{ directory: "~/.claude-c" }],
+      extraUsage: { "~/.claude-c": { session: 1, weekly: 0 } },
+      plans: { "~/.claude-c": { subscriptionType: "max", rateLimitTier: "default_claude_max_5x" } },
+    });
+    // Named accounts hit their session limit; the discovered account still has room.
+    usage.set("~/.claude", { session: 100, weekly: 99 });
+    usage.set("~/.claude-b", { session: 100, weekly: 99 });
+    thread("thr_move", OPUS, { turns: 3 });
+    await refresh();
+    const env = await turn("thr_move");
+    expect(env).toContainEqual({
+      name: "CLAUDE_CONFIG_DIR",
+      value: "/home/u/.claude-c",
+      reason: "Claude Accounts: this turn uses account C",
+    });
   });
 
   it("prints a status with machines, usage, and pinned counts", async () => {

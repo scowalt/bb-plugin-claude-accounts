@@ -21,6 +21,13 @@ Claude Code's own `/login`.
   run exactly as before. bb resolves the environment before it records the
   turn, so the plugin learns each turn's model from bb's `message.dispatch`
   hook. The hook only listens: it never holds or rejects a message.
+- **A new subscription joins on its own.** Each machine looks for Claude Code
+  config directories beside the default one (`~/.claude`, `~/.claude-b`,
+  `~/.claude-c`, …). A directory holding a login is added to the rotation after
+  the configured accounts, named from its suffix (`~/.claude-c` becomes `C`),
+  with its plan and usage read straight away. Signing in stays the only manual
+  step. Naming a directory in the `accounts` setting still wins: it keeps its
+  letter, its order, and its place on machines that do not have the directory.
 - **New threads go to the largest plan with headroom.** That means session use
   under 85 % and weekly use under 90 %, counting the weekly allowance for the
   thread's model family (Fable, for example). Among accounts on the same plan,
@@ -64,7 +71,9 @@ and pi-claude-bridge 0.9.3.
    ```
 
    Use the exact path, with no trailing slash. On macOS the login goes to the
-   Keychain, in an entry tied to that path.
+   Keychain, in an entry tied to that path. A directory named like `~/.claude-*`
+   is found automatically once it holds a login, so the setting below is only
+   needed for a letter you choose or a path outside that pattern.
 2. Install the plugin and list the accounts:
 
    ```sh
@@ -83,6 +92,7 @@ and pi-claude-bridge 0.9.3.
 | Command | What it does |
 | --- | --- |
 | `bb claude-accounts [status] [--json]` | Accounts, plans, machines, usage, pinned thread counts, blocks, and warnings |
+| `bb claude-accounts accounts [--json]` | Every account in use, and whether the setting named it |
 | `bb claude-accounts explain [thread] [--json]` | A thread's pin, last decision, queued retry, and next pick |
 | `bb claude-accounts pin <thread> <account>` | Pin a thread by hand, from its next turn |
 | `bb claude-accounts unpin <thread>` | Let the rules pick again |
@@ -92,7 +102,7 @@ and pi-claude-bridge 0.9.3.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `accounts` | `A=~/.claude` | `Name=directory` pairs. The order breaks ties. |
+| `accounts` | `A=~/.claude` | `Name=directory` pairs. The order breaks ties. Signed-in `~/.claude-*` directories the setting omits are added automatically. |
 | `mode` | `route` | `observe` records decisions but changes no environment |
 | `newThreadSessionPercent` | 85 | A thread starts on or moves to an account only while its session use is below this |
 | `newThreadWeeklyPercent` | 90 | The same for weekly use |

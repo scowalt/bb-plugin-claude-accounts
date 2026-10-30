@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { join, normalize } from "node:path";
 import { z } from "zod";
 import type { InspectedAccount, PlanRead, UsageRead } from "./contract";
+import type { DiscoveredDirectory } from "./accounts";
 import { parseUsageResponse } from "./usage";
 
 export interface ClaudeHomeDeps {
@@ -13,6 +14,8 @@ export interface ClaudeHomeDeps {
   exists(path: string): Promise<boolean>;
   /** The Keychain item's secret (`withSecret`) or "" when it only exists; null when it is missing. */
   keychain(service: string, withSecret: boolean, signal?: AbortSignal): Promise<string | null>;
+  /** Entry names in a directory; ENOENT when the directory does not exist. */
+  list(path: string): Promise<string[]>;
   fetch: typeof fetch;
   /** The installed Claude Code version, for a client-compatible user agent. */
   cliVersion(signal?: AbortSignal): Promise<string | null>;
@@ -73,6 +76,47 @@ export function resolveDirectory(directory: string, home: string): string {
 
 export function isDefaultPath(path: string, home: string): boolean {
   return normalize(path) === normalize(join(home, ".claude"));
+}
+
+/** The `.claude-a` suffix carries a space in the fingerprints Claude Code names Keychain items with. */
+export function isSiblingName(name: string): boolean {
+  return /^\.claude[-_][^/]+$/u.test(name);
+}
+
+/** A config directory in `~/…` form when it sits under the home directory. */
+export function portableDirectory(path: string, home: string): string {
+  const normalized = resolveDirectory(path, home);
+  return normalized.startsWith(`${home}/`) ? `~/${normalized.slice(home.length + 1)}` : normalized;
+}
+
+/**
+ * Finds Claude Code config directories beside the default one — `~/.claude`, `~/.claude-b` —
+ * recording which hold a login. A directory qualifies only if it carries the identity or the
+ * credentials a login leaves behind, so unrelated `.claude-*` names are ignored.
+ */
+export async function discoverDirectories(deps: ClaudeHomeDeps, signal?: AbortSignal): Promise<DiscoveredDirectory[]> {
+  let names: string[];
+  try {
+    names = await deps.list(deps.home);
+  } catch {
+    return [];
+  }
+  const candidates = names.filter((name) => isSiblingName(name)).sort();
+  const found = await Promise.all(
+    candidates.map(async (name): Promise<DiscoveredDirectory | null> => {
+      const path = join(deps.home, name);
+      const hasIdentity = await deps.exists(join(path, ".claude.json"));
+      // On macOS the login lives in the Keychain, so the identity file is the only local evidence.
+      const hasCredentials = deps.platform === "darwin" || (await deps.exists(join(path, ".credentials.json")));
+      if (!hasIdentity && !hasCredentials) return null;
+      return {
+        directory: portableDirectory(path, deps.home),
+        isDefault: false,
+        signedIn: await hasLogin(path, false, deps, signal),
+      };
+    }),
+  );
+  return found.filter((entry): entry is DiscoveredDirectory => entry !== null);
 }
 
 /** Claude Code's Keychain item: the default login, or one suffixed by a hash of CLAUDE_CONFIG_DIR. */

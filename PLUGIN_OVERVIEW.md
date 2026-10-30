@@ -8,6 +8,9 @@ Run your Pi threads on several Claude subscriptions without a proxy.
   fails on a Claude limit, the thread moves to another account at its next
   turn. A retry is queued for you, and dropped if you continue the thread
   first.
+- **New logins join by themselves.** A signed-in `~/.claude-*` directory is
+  found on each machine and added to the rotation, so a new subscription needs
+  only its `/login`.
 - **Usage for every account** in bb's usage card, and in
   `bb claude-accounts status`.
 - **`bb claude-accounts explain`** tells you which account a thread uses and

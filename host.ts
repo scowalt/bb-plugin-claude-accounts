@@ -1,10 +1,10 @@
 // bb-plugin-claude-accounts — host entry. Runs on each machine and reads its Claude Code config directories.
 import { execFile } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk";
-import { inspectDirectory, readPlan, readUsage, type ClaudeHomeDeps } from "./lib/claude-home";
+import { inspectDirectory, discoverDirectories, readPlan, readUsage, type ClaudeHomeDeps } from "./lib/claude-home";
 import { hostContract } from "./lib/contract";
 
 const run = promisify(execFile);
@@ -24,6 +24,9 @@ const deps: ClaudeHomeDeps = {
     } catch {
       return false;
     }
+  },
+  async list(path) {
+    return readdir(path);
   },
   async keychain(service, withSecret, signal) {
     try {
@@ -51,10 +54,15 @@ const deps: ClaudeHomeDeps = {
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
+    discover: async (_input, context) => ({
+      home: deps.home,
+      directories: (await discoverDirectories(deps, context.signal)).map((entry) => entry.directory),
+    }),
     inspect: async ({ directories }, context) => ({
       home: deps.home,
       platform: deps.platform,
       accounts: await Promise.all(directories.map((directory) => inspectDirectory(directory, deps, context.signal))),
+      discovered: await discoverDirectories(deps, context.signal),
     }),
     readUsage: ({ directory }, context) => readUsage(directory, deps, context.signal),
     readPlan: ({ directory }, context) => readPlan(directory, deps, context.signal),

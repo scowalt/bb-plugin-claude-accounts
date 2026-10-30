@@ -50,6 +50,54 @@ export function parseAccounts(value: string): AccountSpec[] {
   });
 }
 
+/** A Claude Code config directory a machine found, whether or not the setting names it. */
+export interface DiscoveredDirectory {
+  /** In `~/…` form when it lives under the home directory, so it resolves on every machine. */
+  directory: string;
+  isDefault: boolean;
+  signedIn: boolean;
+}
+
+/** `~/.claude-b` → `B`, so a discovered directory is named like the ones people configure by hand. */
+function discoveredName(directory: string, isDefault: boolean, used: Set<string>): string {
+  const suffix = /(?:^|\/)\.claude-([^/]+)$/u.exec(directory)?.[1];
+  const preferred = isDefault || suffix === undefined ? "A" : suffix.toUpperCase();
+  const usable = NAME_PATTERN.test(preferred) && !used.has(preferred.toLowerCase());
+  if (usable) return preferred;
+  for (let index = 1; index <= MAX_ACCOUNTS * 2; index += 1) {
+    const candidate = `D${index}`;
+    if (!used.has(candidate.toLowerCase())) return candidate;
+  }
+  return `D${used.size + 1}`;
+}
+
+/**
+ * Adds the signed-in directories a machine discovered that the setting does not name, after the
+ * configured ones. Configured entries keep their names and order, and the default login is only
+ * added when nothing configured already covers it.
+ */
+export function mergeDiscoveredAccounts(
+  configured: readonly AccountSpec[],
+  discovered: readonly DiscoveredDirectory[],
+): AccountSpec[] {
+  const used = new Set(configured.map((spec) => spec.name.toLowerCase()));
+  const known = new Set(configured.map((spec) => normalizeDirectory(spec.directory)));
+  const merged = [...configured];
+  for (const candidate of discovered) {
+    if (merged.length >= MAX_ACCOUNTS) break;
+    if (!candidate.signedIn) continue;
+    const directory = normalizeDirectory(candidate.directory);
+    if (known.has(directory)) continue;
+    const directorySeen = merged.some((spec) => normalizeDirectory(spec.directory) === directory);
+    if (directorySeen) continue;
+    const name = discoveredName(directory, candidate.isDefault, used);
+    used.add(name.toLowerCase());
+    known.add(directory);
+    merged.push({ name, directory, order: merged.length });
+  }
+  return merged;
+}
+
 /** Max 20x → 20, Max 5x → 5, Pro → 1, from the login's rate-limit tier. Null when unknown. */
 export function planWeight(rateLimitTier: string | null, subscriptionType: string | null): number | null {
   const max = /max_(\d+)x/u.exec(rateLimitTier ?? "");

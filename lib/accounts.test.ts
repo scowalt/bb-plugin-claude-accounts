@@ -1,6 +1,7 @@
 import {
   isClaudeBridgeModel,
   matchesModelPattern,
+  mergeDiscoveredAccounts,
   modelFamily,
   parseAccounts,
   parseModelPatterns,
@@ -62,5 +63,56 @@ describe("models", () => {
     expect(matchesModelPattern("claude-bridge/claude-haiku-5-5", "claude-bridge/claude-haiku-*")).toBe(true);
     expect(matchesModelPattern("claude-bridge/claude-opus-5-5", "claude-bridge/claude-haiku-*")).toBe(false);
     expect(matchesModelPattern("xzy", "x.y")).toBe(false);
+  });
+});
+
+describe("mergeDiscoveredAccounts", () => {
+  const configured = parseAccounts("A=~/.claude, B=~/.claude-b");
+
+  it("adds signed-in directories the setting does not name, after the configured ones", () => {
+    expect(
+      mergeDiscoveredAccounts(configured, [
+        { directory: "~/.claude", isDefault: true, signedIn: true },
+        { directory: "~/.claude-b", isDefault: false, signedIn: true },
+        { directory: "~/.claude-c", isDefault: false, signedIn: true },
+      ]),
+    ).toEqual([
+      { name: "A", directory: "~/.claude", order: 0 },
+      { name: "B", directory: "~/.claude-b", order: 1 },
+      { name: "C", directory: "~/.claude-c", order: 2 },
+    ]);
+  });
+
+  it("skips directories without a login", () => {
+    const merged = mergeDiscoveredAccounts(configured, [
+      { directory: "~/.claude-c", isDefault: false, signedIn: false },
+    ]);
+    expect(merged.map((spec) => spec.name)).toEqual(["A", "B"]);
+  });
+
+  it("takes the default login when nothing names it", () => {
+    const merged = mergeDiscoveredAccounts(parseAccounts("work=~/.claude-work"), [
+      { directory: "~/.claude", isDefault: true, signedIn: true },
+    ]);
+    expect(merged.map((spec) => [spec.name, spec.directory])).toEqual([
+      ["work", "~/.claude-work"],
+      ["A", "~/.claude"],
+    ]);
+  });
+
+  it("falls back to a numbered name when the suffix is unusable or taken", () => {
+    const merged = mergeDiscoveredAccounts(parseAccounts("C=~/.claude-keep"), [
+      { directory: "~/.claude-c", isDefault: false, signedIn: true },
+      { directory: "~/.claude-a b", isDefault: false, signedIn: true },
+    ]);
+    expect(merged.map((spec) => spec.name)).toEqual(["C", "D1", "D2"]);
+  });
+
+  it("keeps a discovered directory once even when two machines report it", () => {
+    const merged = mergeDiscoveredAccounts(configured, [
+      { directory: "~/.claude-c", isDefault: false, signedIn: true },
+      { directory: "~/.claude-c/", isDefault: false, signedIn: true },
+    ]);
+    expect(merged.map((spec) => spec.name)).toEqual(["A", "B", "C"]);
   });
 });

@@ -12,7 +12,9 @@ import { z } from "zod";
 import {
   isClaudeBridgeModel,
   matchesModelPattern,
+  mergeDiscoveredAccounts,
   modelFamily,
+  normalizeDirectory,
   planLabel,
   planWeight,
   type AccountSpec,
@@ -111,6 +113,8 @@ export interface MachineStatus {
 export interface AccountStatus {
   name: string;
   directory: string;
+  /** True when a machine found this directory and the accounts setting does not name it. */
+  discovered: boolean;
   email: string | null;
   accountUuid: string | null;
   organizationUuid: string | null;
@@ -208,6 +212,33 @@ export class Engine {
     this.random = options.random ?? Math.random;
   }
 
+  /**
+   * The configured accounts plus any signed-in `~/.claude-*` directory a machine found that the
+   * setting does not name, so a new subscription only needs its `claude` /login to join the rotation.
+   * Configured entries keep their names, and the configured list is used whenever discovery finds nothing.
+   */
+  private effectiveSettings(configured: EngineSettings): EngineSettings {
+    const discovered = [...this.inventories.values()].flatMap((inventory) => inventory.discovered ?? []);
+    if (discovered.length === 0) return configured;
+    const configuredByDirectory = new Map(
+      configured.accounts.map((spec) => [normalizeDirectory(spec.directory), spec]),
+    );
+    const accounts = mergeDiscoveredAccounts(configured.accounts, discovered).map((spec, order) => ({
+      ...(configuredByDirectory.get(normalizeDirectory(spec.directory)) ?? spec),
+      order,
+    }));
+    return { ...configured, accounts };
+  }
+
+  private async currentSettings(): Promise<EngineSettings> {
+    return this.effectiveSettings(await this.settings());
+  }
+
+  /** The accounts actually in rotation: the setting's, plus any a machine discovered. */
+  async settingsView(): Promise<EngineSettings> {
+    return this.currentSettings();
+  }
+
   /** Restores the last known inventory, usage, plans, and blocks so a restart routes like before. */
   async load(): Promise<void> {
     for (const name of await this.kv.list("inventory:")) {
@@ -230,7 +261,7 @@ export class Engine {
 
   /** Re-checks logins and reads usage; plans are read when an hour old, or now with `readPlansNow`. */
   async refreshAll(signal?: AbortSignal, readPlansNow = false): Promise<void> {
-    const settings = await this.settings();
+    const settings = await this.currentSettings();
     let hosts: Array<{ id: string; status: string }> = [];
     try {
       hosts = await this.sdk().hosts.list();
@@ -250,6 +281,7 @@ export class Engine {
   private async inspectHost(hostId: string, settings: EngineSettings, signal?: AbortSignal): Promise<void> {
     const running = this.inspecting.get(hostId);
     if (running) return running;
+    const before = new Set(this.inventories.get(hostId)?.discovered?.map((entry) => entry.directory) ?? []);
     const work = (async () => {
       try {
         const result = await this.host.inspect(
@@ -260,6 +292,9 @@ export class Engine {
         const inventory: HostInventory = { ...result, hostId, checkedAt: this.now() };
         this.inventories.set(hostId, inventory);
         await this.kv.set(key.inventory(hostId), inventory);
+        // A directory that appeared since the last check may hold a new login, so route on it now.
+        const appeared = (result.discovered ?? []).filter((entry) => entry.signedIn && !before.has(entry.directory));
+        if (appeared.length > 0) this.noteDiscovered(hostId, appeared);
       } catch (error) {
         this.log.warn(`Could not inspect Claude config directories on ${hostId}: ${errorText(error)}`);
       } finally {
@@ -271,10 +306,25 @@ export class Engine {
     return work;
   }
 
+  /** Reads usage for accounts that discovery added, so a new subscription starts with a real plan and windows. */
+  private noteDiscovered(hostId: string, appeared: Array<{ directory: string }>): void {
+    void (async () => {
+      const settings = await this.currentSettings();
+      const added = settings.accounts.filter((spec) =>
+        appeared.some((entry) => normalizeDirectory(entry.directory) === normalizeDirectory(spec.directory)),
+      );
+      if (added.length === 0) return;
+      this.log.info(
+        `Claude Accounts found ${added.map((spec) => `${spec.name} (${spec.directory})`).join(", ")} on ${hostId} and added the login(s) to the rotation.`,
+      );
+      await Promise.all(added.flatMap((spec) => [this.refreshUsage(spec), this.refreshPlan(spec, true)]));
+    })().catch((error) => this.log.warn(`Could not read a discovered account: ${errorText(error)}`));
+  }
+
   private inspectSoon(hostId: string): void {
     if (this.now() - (this.lastInspect.get(hostId) ?? 0) < INSPECT_DEBOUNCE_MS) return;
     this.lastInspect.set(hostId, this.now());
-    void this.settings().then((settings) => this.inspectHost(hostId, settings));
+    void this.currentSettings().then((settings) => this.inspectHost(hostId, settings));
   }
 
   /** Reads usage on the server machine when the account is signed in there, else on any machine that has it. */
@@ -366,7 +416,7 @@ export class Engine {
   }
 
   private async refreshUsageSoon(account: string): Promise<void> {
-    const settings = await this.settings();
+    const settings = await this.currentSettings();
     const spec = settings.accounts.find((candidate) => candidate.name === account);
     if (!spec) return;
     if (this.now() - (this.usage.get(account)?.checkedAt ?? 0) < REFRESH_DEBOUNCE_MS) return;
@@ -580,7 +630,7 @@ export class Engine {
         this.inspectSoon(context.hostId);
         return [];
       }
-      const settings = await this.settings();
+      const settings = await this.currentSettings();
       // A message that joins a running turn, such as a steer or a delivered tool result, reaches the
       // Claude Code process that turn started, which keeps its login. Picking again would move the pin
       // off the account the turn runs on, and the turn's limit failure would block the wrong account.
@@ -687,7 +737,7 @@ export class Engine {
       await record(`Account ${pin.account} hit ${what}; the thread is pinned there by hand, so it stays.`);
       return;
     }
-    const settings = await this.settings();
+    const settings = await this.currentSettings();
     const pick = await this.decide(event.threadId, pin.hostId, pin.model, settings, async () => true);
     const moved = pick.account !== null && pick.account !== pin.account;
     if (settings.mode !== "route") {
@@ -780,9 +830,9 @@ export class Engine {
   }
 
   async setManualPin(threadId: string, account: string): Promise<Pin> {
-    const settings = await this.settings();
+    const settings = await this.currentSettings();
     if (!settings.accounts.some((spec) => spec.name === account)) {
-      throw new Error(`No account is named ${account}. Configured: ${settings.accounts.map((spec) => spec.name).join(", ")}.`);
+      throw new Error(`No account is named ${account}. Available: ${settings.accounts.map((spec) => spec.name).join(", ")}.`);
     }
     const current = await this.kv.get<Pin>(key.pin(threadId));
     const request = await this.latestRequest(threadId);
@@ -821,7 +871,7 @@ export class Engine {
   async explain(threadId: string): Promise<Explanation> {
     const pin = (await this.kv.get<Pin>(key.pin(threadId))) ?? null;
     const decision = (await this.kv.get<Decision>(key.decision(threadId))) ?? null;
-    const settings = await this.settings();
+    const settings = await this.currentSettings();
     const next = pin && pin.hostId !== "" ? this.pick(settings, pin.hostId, pin.model, pin) : null;
     return { threadId, pin, decision, next };
   }
@@ -830,14 +880,14 @@ export class Engine {
   async availability(threadId: string) {
     const pin = await this.kv.get<Pin>(key.pin(threadId));
     if (!pin || pin.hostId === "") return { kind: "not-routed" } as const;
-    const pick = this.pick(await this.settings(), pin.hostId, pin.model, pin);
+    const pick = this.pick(await this.currentSettings(), pin.hostId, pin.model, pin);
     if (pick.account !== null && pick.ready) return { kind: "ready" } as const;
     if (pick.readyAt !== null) return { kind: "blocked", retryAt: pick.readyAt } as const;
     return { kind: "unavailable", reason: "reset-unknown" } as const;
   }
 
   async status(): Promise<EngineStatus> {
-    const settings = await this.settings();
+    const settings = await this.currentSettings();
     const now = this.now();
     let hosts: Array<{ id: string; name: string }> = [];
     try {
@@ -852,6 +902,9 @@ export class Engine {
       if (pin) pinCounts.set(pin.account, (pinCounts.get(pin.account) ?? 0) + 1);
     }
     const warnings: string[] = [];
+    const configuredKeys = new Set(
+      (await this.settings()).accounts.map((spec) => `${spec.name}\u0000${normalizeDirectory(spec.directory)}`),
+    );
     const accounts = settings.accounts.map((spec): AccountStatus => {
       const identity = this.identity(spec);
       const plan = this.plan(spec);
@@ -883,6 +936,7 @@ export class Engine {
       return {
         name: spec.name,
         directory: spec.directory,
+        discovered: !configuredKeys.has(`${spec.name}\u0000${normalizeDirectory(spec.directory)}`),
         email: identity?.email ?? null,
         accountUuid: identity?.accountUuid ?? null,
         organizationUuid: identity?.organizationUuid ?? null,
@@ -913,9 +967,9 @@ export class Engine {
     };
   }
 
-  /** For the provider-usage.v1 source: one entry per configured account. */
+  /** For the provider-usage.v1 source: one entry per account in rotation, configured or discovered. */
   async usageResources() {
-    const settings = await this.settings();
+    const settings = await this.currentSettings();
     return settings.accounts.map((spec) => {
       const identity = this.identity(spec);
       const plan = this.plan(spec);

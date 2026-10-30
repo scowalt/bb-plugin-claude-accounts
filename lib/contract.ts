@@ -31,6 +31,18 @@ export const inspectResultSchema = z
     home: z.string(),
     platform: z.string(),
     accounts: z.array(inspectedAccountSchema),
+    /** Other Claude Code config directories on this machine, with whether each holds a login. */
+    discovered: z
+      .array(
+        z
+          .object({
+            directory: z.string(),
+            isDefault: z.boolean(),
+            signedIn: z.boolean(),
+          })
+          .strict(),
+      )
+      .default([]),
   })
   .strict();
 export type InspectResult = z.infer<typeof inspectResultSchema>;
@@ -48,6 +60,10 @@ export const planReadSchema = z.discriminatedUnion("status", [
 export type PlanRead = z.infer<typeof planReadSchema>;
 
 export const hostContract = defineRpcContract({
+  discover: {
+    input: z.object({}).strict(),
+    output: z.object({ home: z.string(), directories: z.array(directorySchema) }).strict(),
+  },
   inspect: {
     input: z.object({ directories: z.array(directorySchema).min(1).max(16) }).strict(),
     output: inspectResultSchema,

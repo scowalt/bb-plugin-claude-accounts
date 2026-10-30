@@ -1,4 +1,12 @@
-import { inspectDirectory, keychainService, readPlan, readUsage, resolveDirectory, type ClaudeHomeDeps } from "./claude-home";
+import {
+  discoverDirectories,
+  inspectDirectory,
+  keychainService,
+  readPlan,
+  readUsage,
+  resolveDirectory,
+  type ClaudeHomeDeps,
+} from "./claude-home";
 import { maxResponse } from "./fixtures";
 
 const NOW = Date.parse("2026-10-23T14:00:00Z");
@@ -44,6 +52,9 @@ function fakeMachine(files: Record<string, string>, overrides: Partial<ClaudeHom
     },
     async keychain() {
       return null;
+    },
+    async list() {
+      return [];
     },
     async fetch(url, init) {
       requests.push({ url: String(url), init });
@@ -209,5 +220,39 @@ describe("readPlan", () => {
     expect(await readPlan("~/.claude-b", deps)).toMatchObject({ status: "expired" });
     expect(await readPlan("~/.claude-z", deps)).toMatchObject({ status: "signed-out" });
     expect(requests).toHaveLength(0);
+  });
+});
+
+describe("discoverDirectories", () => {
+  it("finds signed-in sibling directories and ignores other .claude-* names", async () => {
+    const { deps } = fakeMachine({
+      ...machine,
+      [`${HOME}/.claude-c/.claude.json`]: identity("c@example.com", "uuid-c"),
+      [`${HOME}/.claude-c/.credentials.json`]: credentials({ accessToken: "token-c" }),
+      // Signed out: has the identity but no login.
+      [`${HOME}/.claude-d/.claude.json`]: identity("d@example.com", "uuid-d"),
+      // Unrelated names and a directory with nothing a login leaves behind.
+      [`${HOME}/.claude-backups/x.json`]: "{}",
+      [`${HOME}/.claude/.credentials.json.bak`]: credentials(),
+    }, {
+      async list() {
+        return [".claude", ".claude-b", ".claude-c", ".claude-d", ".claude-backups", ".cache", ".claude.json"];
+      },
+    });
+    const found = await discoverDirectories(deps);
+    expect(found).toEqual([
+      { directory: "~/.claude-b", isDefault: false, signedIn: true },
+      { directory: "~/.claude-c", isDefault: false, signedIn: true },
+      { directory: "~/.claude-d", isDefault: false, signedIn: false },
+    ]);
+  });
+
+  it("reports nothing when the home directory cannot be read", async () => {
+    const { deps } = fakeMachine({}, {
+      async list() {
+        throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+      },
+    });
+    expect(await discoverDirectories(deps)).toEqual([]);
   });
 });

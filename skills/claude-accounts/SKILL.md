@@ -12,6 +12,10 @@ such as `~/.claude` or `~/.claude-b`, signed in with
 sets `CLAUDE_CONFIG_DIR` for the thread's account. The machine's default
 `~/.claude` gets no variable.
 
+A signed-in directory named like `~/.claude-*` is discovered on each machine
+and joins the rotation on its own, so adding a subscription is a `/login` and
+nothing else. The `accounts` setting still wins for a directory it names.
+
 ## Commands
 
 - `bb claude-accounts [status] [--json]` — every account with its plan, the
@@ -28,6 +32,8 @@ sets `CLAUDE_CONFIG_DIR` for the thread's account. The machine's default
 - `bb claude-accounts refresh [--json]` — re-check every machine's logins and
   read every account's usage and plan now, then print the status. Plans come
   from Anthropic, because a login's files keep the plan it signed in on.
+- `bb claude-accounts accounts [--json]` — every account in rotation, split
+  into the ones the setting names and the ones a machine discovered.
 
 ## Rules
 
