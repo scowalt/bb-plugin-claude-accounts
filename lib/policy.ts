@@ -19,6 +19,8 @@ export interface Candidate {
   blockedUntil: number | null;
   /** A limit failure on one model family blocks that family until this time. */
   blockedFamilies: Readonly<Record<string, number>>;
+  /** Threads placed on the account since about its last usage reading, which does not show their use yet. */
+  recentPlacements: number;
 }
 
 export interface PickInput {
@@ -94,12 +96,20 @@ function compareNullable(a: number | null, b: number | null): number {
   return a - b;
 }
 
-/** Larger plans first (smaller first with `preferSmall`), then measured before unmeasured, soonest weekly reset, least weekly use, setting order. */
+/**
+ * Known plans before unknown ones. Then the plan that a new thread loads least, (recent placements + 1) / plan size,
+ * so a burst of new threads spreads across accounts in proportion to their plans; with no recent placements that is
+ * simply the larger plan. With `preferSmall`, the smaller plan. Then measured before unmeasured, soonest weekly
+ * reset, least weekly use, setting order.
+ */
 function compare(a: Candidate, b: Candidate, preferSmall: boolean, now: number): number {
-  if (a.weight !== b.weight) {
-    if (a.weight === null) return 1;
-    if (b.weight === null) return -1;
-    return preferSmall ? a.weight - b.weight : b.weight - a.weight;
+  if (a.weight === null || b.weight === null) {
+    if (a.weight !== b.weight) return a.weight === null ? 1 : -1;
+  } else if (preferSmall) {
+    if (a.weight !== b.weight) return a.weight - b.weight;
+  } else {
+    const load = (a.recentPlacements + 1) * b.weight - (b.recentPlacements + 1) * a.weight;
+    if (load !== 0) return load;
   }
   const measured = Number(a.windows === null) - Number(b.windows === null);
   if (measured !== 0) return measured;
@@ -117,6 +127,16 @@ function compare(a: Candidate, b: Candidate, preferSmall: boolean, now: number):
 
 function describe(found: readonly Blocker[]): string {
   return found.map((blocker) => blocker.label).join(", ");
+}
+
+/** Why a new thread starts where it does. */
+function startDetail(best: Candidate, ranked: readonly Candidate[], preferSmall: boolean, tight: string): string {
+  const placed = ranked.filter((candidate) => candidate.recentPlacements > 0);
+  if (preferSmall || placed.length === 0) {
+    return `Starts on ${best.name}, the ${preferSmall ? "smallest" : "largest"} plan with headroom${tight}.`;
+  }
+  const counts = ranked.map((candidate) => `${candidate.name} ${candidate.recentPlacements}`).join(", ");
+  return `Starts on ${best.name}, the plan with headroom that recent threads load least for its size (recently placed: ${counts})${tight}.`;
 }
 
 export function pickAccount(input: PickInput): Pick {
@@ -153,14 +173,15 @@ export function pickAccount(input: PickInput): Pick {
       .filter((candidate) => candidate.available && blockers(candidate, family, limits, now).length === 0)
       .sort((a, b) => compare(a, b, preferSmall, now));
   const roomy = under(input.newLimits);
-  const best = roomy[0] ?? under(input.moveLimits)[0];
+  const ranked = roomy.length > 0 ? roomy : under(input.moveLimits);
+  const best = ranked[0];
   if (best !== undefined) {
     const tight = roomy.length === 0 ? " (every account is past the new-thread limits; this one is still under the move limits)" : "";
     if (input.pin === null) {
       return {
         account: best.name,
         reason: "new",
-        detail: `Starts on ${best.name}, the ${preferSmall ? "smallest" : "largest"} plan with headroom${tight}.`,
+        detail: startDetail(best, ranked, preferSmall, tight),
         ready: true,
         readyAt: null,
         readyAccount: null,

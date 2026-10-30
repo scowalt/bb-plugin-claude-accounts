@@ -41,6 +41,11 @@ nothing else. The `accounts` setting still wins for a directory it names.
   whose weekly use is under 90 %, including the weekly allowance for the
   thread's model family (for example Fable). Among equal plans, the account
   whose weekly window resets soonest goes first.
+- A burst of new threads spreads out: each placement counts against its
+  account for one poll interval, and a new thread goes to the account it loads
+  least for its plan size, (recent placements + 1) ÷ plan size. Two Max 20x
+  accounts split a burst evenly; a Max 5x account takes one for every four on
+  a Max 20x. Models in `smallAccountModels` still go to the smallest plan.
 - A pinned thread stays until its account reaches 97 % of its session or
   weekly limit, or until a turn fails on a Claude limit. Then it moves at its
   next turn. The move re-sends the thread's context to the new account

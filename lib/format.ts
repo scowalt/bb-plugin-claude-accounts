@@ -36,7 +36,7 @@ export function formatStatus(status: EngineStatus, now: number): string {
   for (const account of status.accounts) {
     lines.push("");
     const plan = account.plan ?? "plan unknown";
-    lines.push(`${account.name}  ${account.directory}  ${account.email ?? "email unknown"}  ${plan}  · ${account.pinnedThreads} thread(s) pinned${account.discovered ? "  · discovered" : ""}`);
+    lines.push(`${account.name}  ${account.directory}  ${account.email ?? "email unknown"}  ${plan}  · ${account.pinnedThreads} thread(s) pinned${account.recentPlacements > 0 ? `, ${account.recentPlacements} placed in the last poll interval` : ""}${account.discovered ? "  · discovered" : ""}`);
     const machines = account.machines
       .map((machine) => `${machine.hostName} ${machine.signedIn ? "signed in" : "not signed in"}${machine.error ? ` (${machine.error})` : ""}`)
       .join(", ");

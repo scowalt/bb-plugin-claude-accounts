@@ -305,6 +305,25 @@ describe("claude-accounts", () => {
     expect(await turn("thr_a")).toEqual([]);
   });
 
+  it("spreads a burst of new threads across two equal plans instead of filling one", async () => {
+    const { turn, thread } = await setup({
+      plans: { "~/.claude-b": { subscriptionType: "max", rateLimitTier: "default_claude_max_20x" } },
+    });
+    const burst = ["thr_1", "thr_2", "thr_3", "thr_4"];
+    for (const id of burst) thread(id);
+    const envs = await Promise.all(burst.map((id) => turn(id)));
+    expect(envs.filter((env) => env.length === 0)).toHaveLength(2);
+    expect(envs.filter((env) => env.some((entry) => entry.value === "B"))).toHaveLength(2);
+  });
+
+  it("counts recent placements in the status", async () => {
+    const { harness, turn, thread } = await setup();
+    thread("thr_a");
+    await turn("thr_a");
+    const { stdout } = await harness.behavior.runCli([]);
+    expect(stdout).toContain("A  ~/.claude  a@example.com  Max (20x)  · 1 thread(s) pinned, 1 placed in the last poll interval");
+  });
+
   it("keeps threads that ran before the plugin on the default login until the move limits", async () => {
     const { turn, thread, usage, refresh } = await setup();
     usage.set("~/.claude", { session: 90, weekly: 17 });

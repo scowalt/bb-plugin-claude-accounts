@@ -125,6 +125,8 @@ export interface AccountStatus {
   blockedUntil: number | null;
   blockedFamilies: Record<string, number>;
   pinnedThreads: number;
+  /** Threads placed on the account within the last usage poll interval. */
+  recentPlacements: number;
 }
 
 export interface EngineStatus {
@@ -201,6 +203,11 @@ export class Engine {
   private readonly lastInspect = new Map<string, number>();
   private readonly reading = new Map<string, Promise<void>>();
   private readonly dispatches = new Map<string, { model: string | null; joinsTurn: boolean; at: number }>();
+  /**
+   * When threads were placed on each account, newest last. A usage reading cannot show a thread placed after it was
+   * taken, so placements count against their account for one poll interval; that spreads a burst of new threads.
+   */
+  private readonly placements = new Map<string, number[]>();
 
   constructor(options: EngineOptions) {
     this.kv = options.kv;
@@ -447,6 +454,17 @@ export class Engine {
     return { subscriptionType: identity?.subscriptionType ?? null, rateLimitTier: identity?.rateLimitTier ?? null };
   }
 
+  private recentPlacements(account: string, settings: EngineSettings): number {
+    const since = this.now() - settings.pollMs;
+    return this.placements.get(account)?.filter((at) => at > since).length ?? 0;
+  }
+
+  /** Synchronous, so a thread whose pick comes next in the same burst already sees this one. */
+  private notePlacement(account: string, settings: EngineSettings): void {
+    const since = this.now() - settings.pollMs;
+    this.placements.set(account, [...(this.placements.get(account) ?? []).filter((at) => at > since), this.now()]);
+  }
+
   private candidates(settings: EngineSettings, hostId: string): Candidate[] {
     const now = this.now();
     return settings.accounts.map((spec) => {
@@ -465,6 +483,7 @@ export class Engine {
         windows: this.usage.get(spec.name)?.windows ?? null,
         blockedUntil: block?.until ?? null,
         blockedFamilies: block?.families ?? {},
+        recentPlacements: this.recentPlacements(spec.name, settings),
       };
     });
   }
@@ -521,6 +540,7 @@ export class Engine {
     const pick = this.pick(settings, hostId, model, pin);
     if (pick.account === null) return pick;
     const changed = pin === null || pin.account !== pick.account;
+    if (changed) this.notePlacement(pick.account, settings);
     if (stored === null || changed || stored.hostId !== hostId || stored.model !== model) {
       await this.kv.set(key.pin(threadId), {
         account: pick.account,
@@ -947,6 +967,7 @@ export class Engine {
         blockedUntil: block?.until !== null && block?.until !== undefined && block.until > now ? block.until : null,
         blockedFamilies: Object.fromEntries(Object.entries(block?.families ?? {}).filter(([, until]) => until > now)),
         pinnedThreads: pinCounts.get(spec.name) ?? 0,
+        recentPlacements: this.recentPlacements(spec.name, settings),
       };
     });
     const organizations = new Map<string, string[]>();

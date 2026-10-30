@@ -32,6 +32,14 @@ Claude Code's own `/login`.
   under 85 % and weekly use under 90 %, counting the weekly allowance for the
   thread's model family (Fable, for example). Among accounts on the same plan,
   the one whose weekly window resets soonest goes first.
+- **Bursts spread out.** A usage reading cannot show threads placed after it
+  was taken, so each placement counts against its account for one poll
+  interval. A new thread goes to the account it loads least for its plan size,
+  (recent placements + 1) ÷ plan size. Eight subagents spawned at once land
+  four and four on two Max 20x accounts instead of eight on one, and a Max 5x
+  account takes one for every four on a Max 20x. Models in
+  `smallAccountModels` still go to the smallest plan. `bb claude-accounts`
+  shows each account's recent placements.
 - **Threads stay put until their account is nearly full.** A thread moves at
   its next turn once its account reaches 97 % of its session or weekly limit.
   Staying put keeps the prompt cache: a move re-sends the thread's context to

@@ -20,6 +20,7 @@ function account(overrides: Partial<Candidate> & Pick<Candidate, "name">): Candi
     windows: windows(10, 10),
     blockedUntil: null,
     blockedFamilies: {},
+    recentPlacements: 0,
     ...overrides,
   };
 }
@@ -154,6 +155,38 @@ describe("pickAccount", () => {
 
   it("prefers the smallest plan for models that ask for it", () => {
     expect(pick({ candidates: [A(), B()], preferSmall: true })).toMatchObject({ account: "B", reason: "new" });
+  });
+
+  it("spreads a burst of new threads across equal plans", () => {
+    const C = (overrides: Partial<Candidate> = {}) => account({ name: "C", order: 2, weight: 20, ...overrides });
+    expect(pick({ candidates: [A({ recentPlacements: 1 }), C()] })).toMatchObject({ account: "C", reason: "new" });
+    expect(pick({ candidates: [A({ recentPlacements: 1 }), C({ recentPlacements: 1 })] }).account).toBe("A");
+  });
+
+  it("sends a burst to a smaller plan only once the larger plan has taken its share", () => {
+    const small = (recentPlacements = 0) => account({ name: "S", order: 2, weight: 5, recentPlacements });
+    expect(pick({ candidates: [A({ recentPlacements: 2 }), small()] }).account).toBe("A");
+    const result = pick({ candidates: [A({ recentPlacements: 4 }), small()] });
+    expect(result).toMatchObject({ account: "S", reason: "new" });
+    expect(result.detail).toBe(
+      "Starts on S, the plan with headroom that recent threads load least for its size (recently placed: S 0, A 4).",
+    );
+  });
+
+  it("moves a pinned thread to the account recent threads load least", () => {
+    const busy = account({ name: "D", order: 2, recentPlacements: 3 });
+    const quiet = account({ name: "C", order: 3, recentPlacements: 0 });
+    expect(pick({ candidates: [A({ windows: windows(98, 17) }), B(), busy, quiet], pin: "A" })).toMatchObject({
+      account: "C",
+      reason: "moved",
+    });
+  });
+
+  it("keeps the smallest plan for models that ask for it, whatever was placed there recently", () => {
+    expect(pick({ candidates: [A(), B({ recentPlacements: 5 })], preferSmall: true })).toMatchObject({
+      account: "B",
+      detail: "Starts on B, the smallest plan with headroom.",
+    });
   });
 
   it("among equal plans, spends the weekly window that resets soonest", () => {
