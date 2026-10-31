@@ -135,6 +135,28 @@ and pi-claude-bridge 0.9.3.
   usage limits "assume ordinary, individual usage". Whether this setup fits
   your accounts is yours to judge.
 
+## CI
+
+Woodpecker runs the existing typecheck, 98-test suite, and a headless plugin build
+on pushes and pull requests. It uses pinned Node 24.20.0, Bun 1.3.11 and bb-app
+0.48.1; no BB server, Claude login, account token, or plugin reload is required.
+The SDK dependency stays at its existing version. The build may report the newer
+CLI's SDK version; it does not update dependencies or publish the generated bundle.
+
+The existing `package-lock.json` remains authoritative. Pinned Bun imports it for
+its frozen install; its generated `bun.lock` is a disposable build artifact, not a
+second maintained lock. Npm only bootstraps the pinned Bun CLI in CI. The Node
+image's matching node-gyp and system Python build native tool dependencies without
+using a developer machine's global toolchain.
+
+Install the staged secret-scanning hook before committing:
+
+```sh
+mise trust
+mise install
+mise exec -- lefthook install
+```
+
 ## Development
 
 ```sh
