@@ -1,4 +1,4 @@
-// Host-side reads of Claude Code config directories. Runs on each machine; never refreshes or rewrites credentials.
+// Host-side reads of Claude Code config directories. Only Claude Code may renew or rewrite credentials.
 import { createHash } from "node:crypto";
 import { join, normalize } from "node:path";
 import { z } from "zod";
@@ -19,6 +19,8 @@ export interface ClaudeHomeDeps {
   fetch: typeof fetch;
   /** The installed Claude Code version, for a client-compatible user agent. */
   cliVersion(signal?: AbortSignal): Promise<string | null>;
+  /** Ask Claude Code to renew this directory's login under its own credential locking. */
+  renewLogin(path: string, signal?: AbortSignal): Promise<void>;
   now(): number;
 }
 
@@ -32,7 +34,7 @@ const PROFILE_PLANS = new Map([
   ["claude_team", "team"],
   ["claude_enterprise", "enterprise"],
 ]);
-/** Treat a token this close to expiry as expired; Claude Code renews it on next use. */
+/** Treat a token this close to expiry as expired. */
 const EXPIRY_MARGIN_MS = 60_000;
 const DEFAULT_KEYCHAIN_SERVICE = "Claude Code-credentials";
 
@@ -219,26 +221,74 @@ interface ReadFailure {
   message: string;
 }
 
-/** GETs an Anthropic endpoint with the directory's own token and returns the JSON body. Never throws. */
+/** In-memory, per host/dependency set; usage and profile reads share the same renewal gate. */
+const renewals = new WeakMap<ClaudeHomeDeps, Map<string, { nextAttemptAt: number; inFlight: Promise<void> | null }>>();
+const RENEWAL_COOLDOWN_MS = 30 * 60_000;
+
+async function renewLogin(path: string, deps: ClaudeHomeDeps, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return false;
+  let accounts = renewals.get(deps);
+  if (accounts === undefined) {
+    accounts = new Map();
+    renewals.set(deps, accounts);
+  }
+  const previous = accounts.get(path);
+  if (previous?.inFlight) {
+    await previous.inFlight;
+    return !signal?.aborted;
+  }
+  if (previous !== undefined && deps.now() < previous.nextAttemptAt) return false;
+  const state: { nextAttemptAt: number; inFlight: Promise<void> | null } = { nextAttemptAt: Infinity, inFlight: null };
+  accounts.set(path, state);
+  state.inFlight = Promise.resolve()
+    .then(() => deps.renewLogin(path, signal))
+    // Never expose subprocess output/errors: they may contain sensitive diagnostics.
+    // Even a failed inference may have renewed the login, so re-read it afterwards.
+    .catch(() => {})
+    .finally(() => {
+      state.nextAttemptAt = deps.now() + RENEWAL_COOLDOWN_MS;
+      state.inFlight = null;
+    });
+  await state.inFlight;
+  return !signal?.aborted;
+}
+
+/** GETs with the directory's own token, delegating expired logins to Claude Code at most once. */
 async function getWithLogin(
   directory: string,
   request: { url: string; what: string; headers: Record<string, string> },
   deps: ClaudeHomeDeps,
   signal?: AbortSignal,
 ): Promise<{ body: unknown } | { failure: ReadFailure }> {
+  const first = await getWithLoginOnce(directory, request, deps, signal);
+  if (!("failure" in first) || first.failure.status !== "expired") return first;
+  if (!(await renewLogin(resolveDirectory(directory, deps.home), deps, signal))) return first;
+  const retry = await getWithLoginOnce(directory, request, deps, signal);
+  // A missing or unreadable login after renewal is still an unsuccessful recovery of the expired read.
+  if ("failure" in retry && (retry.failure.status !== "error" || retry.loginReadFailed)) return first;
+  return retry;
+}
+
+/** A single credential read and GET; never writes a credential or performs an OAuth refresh grant. */
+async function getWithLoginOnce(
+  directory: string,
+  request: { url: string; what: string; headers: Record<string, string> },
+  deps: ClaudeHomeDeps,
+  signal?: AbortSignal,
+): Promise<{ body: unknown } | { failure: ReadFailure; loginReadFailed?: boolean }> {
   const path = resolveDirectory(directory, deps.home);
   const isDefault = isDefaultPath(path, deps.home);
   let credentials: Credentials | null;
   try {
     credentials = await readCredentials(path, isDefault, deps, signal);
   } catch (error) {
-    return { failure: { status: "error", message: `Could not read the login in ${path}: ${message(error)}` } };
+    return { failure: { status: "error", message: `Could not read the login in ${path}: ${message(error)}` }, loginReadFailed: true };
   }
   if (credentials === null) return { failure: { status: "signed-out", message: `No Claude Code login in ${path}.` } };
   const now = deps.now();
   if (typeof credentials.expiresAt === "number" && credentials.expiresAt <= now + EXPIRY_MARGIN_MS) {
     return {
-      failure: { status: "expired", message: "The access token has expired; Claude Code renews it the next time it uses this account." },
+      failure: { status: "expired", message: "The access token has expired; Claude Code could not renew it yet. Renewal attempts are limited to once per 30 minutes." },
     };
   }
   const version = (await deps.cliVersion(signal)) ?? "2.1.0";
@@ -259,7 +309,7 @@ async function getWithLogin(
     });
     if (response.status === 401) {
       await response.body?.cancel().catch(() => {});
-      return { failure: { status: "expired", message: "Anthropic rejected the access token; Claude Code renews it on next use." } };
+      return { failure: { status: "expired", message: "Anthropic rejected the access token; Claude Code could not renew it yet. Renewal attempts are limited to once per 30 minutes." } };
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});

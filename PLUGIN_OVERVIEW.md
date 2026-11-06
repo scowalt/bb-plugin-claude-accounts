@@ -23,8 +23,11 @@ own `/login`. For each turn the plugin sets `CLAUDE_CONFIG_DIR` on the `pi`
 provider. The default `~/.claude` login gets no variable and runs as before.
 The plugin learns each turn's model from bb's `message.dispatch` hook, which
 it never uses to hold or reject a message.
-Tokens stay on their machine and are never refreshed or rewritten by the
-plugin.
+Tokens stay on their machine. For an expired usage or plan read, the host asks
+Claude Code to renew the login with a tiny one-turn Haiku request, then retries.
+This consumes a small amount of quota. Concurrent reads share the attempt and
+renewal attempts are limited to once per directory per host every 30 minutes.
+Only Claude Code rotates or writes credentials; failed renewal stays expired.
 
 ## Requirements
 

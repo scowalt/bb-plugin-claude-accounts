@@ -63,6 +63,7 @@ function fakeMachine(files: Record<string, string>, overrides: Partial<ClaudeHom
     async cliVersion() {
       return "2.1.309";
     },
+    async renewLogin() {},
     now: () => NOW,
     ...overrides,
   };
@@ -160,6 +161,18 @@ describe("readUsage", () => {
     expect(headers["User-Agent"]).toBe("claude-cli/2.1.309 (external, cli) bb-claude-accounts");
   });
 
+  it("renews an idle account through Claude Code and reads usage with the renewed login", async () => {
+    const files = { ...machine, [`${HOME}/.claude-b/.credentials.json`]: credentials({ expiresAt: NOW - 1 }) };
+    const renewLogin = vi.fn(async () => {
+      files[`${HOME}/.claude-b/.credentials.json`] = credentials({ accessToken: "renewed-b" });
+    });
+    const { deps, requests } = fakeMachine(files, { renewLogin });
+    expect(await readUsage("~/.claude-b", deps)).toMatchObject({ status: "ok" });
+    expect(renewLogin).toHaveBeenCalledExactlyOnceWith(`${HOME}/.claude-b`, undefined);
+    expect(requests).toHaveLength(1);
+    expect((requests[0]!.init!.headers as Record<string, string>).Authorization).toBe("Bearer renewed-b");
+  });
+
   it("does not send an expired token", async () => {
     const { deps, requests } = fakeMachine({
       ...machine,
@@ -167,6 +180,126 @@ describe("readUsage", () => {
     });
     expect(await readUsage("~/.claude-b", deps)).toMatchObject({ status: "expired" });
     expect(requests).toHaveLength(0);
+  });
+
+  it("retries a 401 once with credentials re-read after renewal", async () => {
+    const files = { ...machine };
+    const renewLogin = vi.fn(async () => {
+      files[`${HOME}/.claude/.credentials.json`] = credentials({ accessToken: "renewed-a" });
+    });
+    const fetch = vi.fn<ClaudeHomeDeps["fetch"]>()
+      .mockResolvedValueOnce(new Response("no", { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(maxResponse)));
+    const { deps } = fakeMachine(files, { renewLogin, fetch });
+    expect(await readUsage("~/.claude", deps)).toMatchObject({ status: "ok" });
+    expect(renewLogin).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect((fetch.mock.calls[1]![1]!.headers as Record<string, string>).Authorization).toBe("Bearer renewed-a");
+  });
+
+  it("keeps failed renewals expired and waits 30 minutes after completion before trying again", async () => {
+    let now = NOW;
+    const renewLogin = vi.fn(async () => {
+      now += 60_000;
+      throw new Error("sensitive subprocess diagnostics");
+    });
+    const { deps, requests } = fakeMachine({
+      ...machine, [`${HOME}/.claude/.credentials.json`]: credentials({ expiresAt: NOW - 1 }),
+    }, { renewLogin, now: () => now });
+    const first = await readUsage("~/.claude", deps);
+    expect(first).toMatchObject({ status: "expired" });
+    expect(JSON.stringify(first)).not.toContain("sensitive");
+    now += 30 * 60_000 - 1;
+    expect(await readPlan("~/.claude/", deps)).toMatchObject({ status: "expired" });
+    expect(renewLogin).toHaveBeenCalledOnce();
+    now += 1;
+    expect(await readUsage("~/.claude", deps)).toMatchObject({ status: "expired" });
+    expect(renewLogin).toHaveBeenCalledTimes(2);
+    expect(requests).toHaveLength(0);
+  });
+
+  it("coalesces concurrent usage and plan renewal, without blocking a different account", async () => {
+    const files: Record<string, string> = {
+      ...machine,
+      [`${HOME}/.claude/.credentials.json`]: credentials({ expiresAt: NOW - 1 }),
+      [`${HOME}/.claude-b/.credentials.json`]: credentials({ expiresAt: NOW - 1 }),
+    };
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const renewLogin = vi.fn(async (path: string) => {
+      if (path === `${HOME}/.claude`) await waiting;
+      files[`${path}/.credentials.json`] = credentials();
+    });
+    const { deps } = fakeMachine(files, {
+      renewLogin,
+      fetch: async (url) => new Response(JSON.stringify(String(url).endsWith("profile") ? profile : maxResponse)),
+    });
+    const usage = readUsage("~/.claude", deps);
+    const plan = readPlan(`${HOME}/.claude/`, deps);
+    await vi.waitFor(() => expect(renewLogin).toHaveBeenCalledTimes(1));
+    expect(await readUsage("~/.claude-b", deps)).toMatchObject({ status: "ok" });
+    release();
+    expect(await usage).toMatchObject({ status: "ok" });
+    expect(await plan).toMatchObject({ status: "ok", subscriptionType: "max" });
+    expect(renewLogin).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not loop when the renewed token is still rejected", async () => {
+    const renewLogin = vi.fn(async () => {});
+    const fetch = vi.fn(async () => new Response("no", { status: 401 }));
+    const { deps } = fakeMachine(machine, { renewLogin, fetch });
+    expect(await readUsage("~/.claude", deps)).toMatchObject({ status: "expired" });
+    expect(renewLogin).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(await readUsage("~/.claude", deps)).toMatchObject({ status: "expired" });
+    expect(renewLogin).toHaveBeenCalledOnce();
+  });
+
+  it("does not renew a healthy, missing, malformed, aborted, or non-401 login", async () => {
+    const renewLogin = vi.fn(async () => {});
+    const { deps } = fakeMachine({
+      ...machine, [`${HOME}/.claude-b/.credentials.json`]: "not json",
+    }, { renewLogin });
+    expect(await readUsage("~/.claude", deps)).toMatchObject({ status: "ok" });
+    expect(await readUsage("~/.claude-z", deps)).toMatchObject({ status: "signed-out" });
+    expect(await readUsage("~/.claude-b", deps)).toMatchObject({ status: "error" });
+    deps.fetch = async () => new Response("no", { status: 503 });
+    expect(await readUsage("~/.claude", deps)).toMatchObject({ status: "error" });
+    deps.readFile = async () => credentials({ expiresAt: NOW - 1 });
+    expect(await readUsage("~/.claude", deps, AbortSignal.abort())).toMatchObject({ status: "expired" });
+    expect(renewLogin).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the Keychain after delegating renewal on macOS", async () => {
+    let login = credentials({ expiresAt: NOW - 1 });
+    const renewLogin = vi.fn(async () => { login = credentials({ accessToken: "renewed-mac" }); });
+    const keychain = vi.fn(async () => login);
+    const { deps, requests } = fakeMachine({}, { platform: "darwin", keychain, renewLogin });
+    expect(await readUsage("~/.claude-b", deps)).toMatchObject({ status: "ok" });
+    expect(keychain).toHaveBeenCalledTimes(2);
+    expect(keychain).toHaveBeenCalledWith(keychainService(`${HOME}/.claude-b`, false), true, undefined);
+    expect((requests[0]!.init!.headers as Record<string, string>).Authorization).toBe("Bearer renewed-mac");
+  });
+
+  it.each(["missing", "malformed"])("keeps an expired read expired when renewal leaves the login %s", async (outcome) => {
+    const files: Record<string, string> = {
+      ...machine, [`${HOME}/.claude/.credentials.json`]: credentials({ expiresAt: NOW - 1 }),
+    };
+    const { deps } = fakeMachine(files, { renewLogin: async () => {
+      if (outcome === "missing") delete files[`${HOME}/.claude/.credentials.json`];
+      else files[`${HOME}/.claude/.credentials.json`] = "not json";
+      throw new Error("renewal failed");
+    } });
+    expect(await readUsage("~/.claude", deps)).toMatchObject({ status: "expired" });
+  });
+
+  it("accepts renewed credentials even if the print request subsequently fails", async () => {
+    const files = { ...machine, [`${HOME}/.claude/.credentials.json`]: credentials({ expiresAt: NOW - 1 }) };
+    const { deps } = fakeMachine(files, { renewLogin: async () => {
+      files[`${HOME}/.claude/.credentials.json`] = credentials();
+      throw new Error("inference rate limited after renewal");
+    } });
+    expect(await readUsage("~/.claude", deps)).toMatchObject({ status: "ok" });
   });
 
   it("reports rejected tokens and missing logins", async () => {
@@ -204,6 +337,15 @@ describe("readPlan", () => {
     expect(requests.map((request) => [request.url, request.headers.Authorization])).toEqual([
       ["https://api.anthropic.com/api/oauth/profile", "Bearer token-b"],
     ]);
+  });
+
+  it("renews a near-expiry login when the profile is read first", async () => {
+    const files = { ...machine, [`${HOME}/.claude/.credentials.json`]: credentials({ expiresAt: NOW + 60_000 }) };
+    const renewLogin = vi.fn(async () => { files[`${HOME}/.claude/.credentials.json`] = credentials(); });
+    const { fetch } = answering(profile);
+    const { deps } = fakeMachine(files, { renewLogin, fetch });
+    expect(await readPlan("~/.claude", deps)).toMatchObject({ status: "ok", subscriptionType: "max" });
+    expect(renewLogin).toHaveBeenCalledOnce();
   });
 
   it("reports a profile that names no plan it knows", async () => {
