@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk";
 import { inspectDirectory, discoverDirectories, readPlan, readUsage, type ClaudeHomeDeps } from "./lib/claude-home";
 import { hostContract } from "./lib/contract";
+import { renewClaudeLogin } from "./lib/renew-login";
 
 const run = promisify(execFile);
 /** `security` exits 44 when the Keychain item is missing. */
@@ -48,6 +49,7 @@ const deps: ClaudeHomeDeps = {
       .catch(() => null);
     return cliVersion;
   },
+  renewLogin: renewClaudeLogin,
   now: Date.now,
 };
 

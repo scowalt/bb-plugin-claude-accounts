@@ -73,5 +73,10 @@ account).
 
 - Do not pin a long thread to a small account. The switch re-sends its whole
   context, which can use up a Pro session window at once.
+- Expired usage/plan reads ask Claude Code to renew the login, then retry once.
+  This runs a tiny `claude -p` Haiku request and consumes a small amount of quota;
+  `auth status` is not a reliable renewal command. Attempts are coalesced and
+  limited to once per directory per host every 30 minutes (reset on worker
+  restart). Failed renewal remains `expired`; refresh does not bypass cooldown.
 - Never sign accounts in or out, and never read or edit credential files.
-  Signing in is the user's step.
+  Signing in is the user's step. Only Claude Code handles credential renewal.

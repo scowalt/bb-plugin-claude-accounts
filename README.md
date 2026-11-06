@@ -57,7 +57,7 @@ Claude Code's own `/login`.
   machine.
 - **Usage everywhere.** Each machine's host entry reads its config directories
   and calls Anthropic's usage endpoint with that directory's token. Tokens
-  never leave the machine, and the plugin never refreshes or rewrites them.
+  never leave the machine; only Claude Code renews or rewrites them.
   Every account appears as a "Claude Accounts" group in bb's usage card,
   through the `provider-usage.v1` contract.
 - **Plans come from Anthropic.** A login's files keep the plan it signed in on,
@@ -125,9 +125,17 @@ and pi-claude-bridge 0.9.3.
   mid-turn, the turn fails once and is retried on the next account. A message
   that joins a running turn, such as a steer or a delivered tool result, stays
   on the turn's account.
-- **Idle accounts show their last reading.** An account no thread has used for
-  about 8 hours has an expired access token. It shows its last usage reading
-  until a thread uses it again; the plugin never refreshes the token itself.
+- **Idle logins are renewed through Claude Code.** When an access token expires
+  or Anthropic returns 401, the host runs a tiny, one-turn `claude -p` Haiku
+  request using that account's config directory, then re-reads the login and retries once.
+  This uses a small amount of quota: `claude auth status` in 2.1.314 can skip
+  renewal during subcommand startup, so it is not a reliable quota-free option.
+  Concurrent usage/plan reads share one attempt, with a 30-minute cooldown per
+  directory on each host (reset on host-worker restart). The subprocess has no
+  tools or MCP servers, ignores user/project settings, discards output, and
+  times out after 60 seconds. Only Claude Code rotates/writes credentials under
+  its own locking; the plugin never does an OAuth refresh grant. Failed renewal
+  leaves usage `expired` and retains the last reading until a later poll succeeds.
 - **Experimental API.** `bb.providers.experimental_contributeEnv` may change in
   a bb update. After updating bb, check `bb claude-accounts explain` on a
   thread that moved.
@@ -137,7 +145,7 @@ and pi-claude-bridge 0.9.3.
 
 ## CI
 
-Woodpecker runs the existing typecheck, 98-test suite, and a headless plugin build
+Woodpecker runs the typecheck, Vitest suite, and a headless plugin build
 on pushes and pull requests. It uses pinned Node 24.20.0, Bun 1.3.11 and bb-app
 0.48.1; no BB server, Claude login, account token, or plugin reload is required.
 The SDK dependency stays at its existing version. The build may report the newer
