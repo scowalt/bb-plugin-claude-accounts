@@ -13,6 +13,9 @@ Run your Pi threads on several Claude subscriptions without a proxy.
   only its `/login`.
 - **Usage for every account** in bb's usage card, and in
   `bb claude-accounts status`.
+- **Signed-out machines are flagged.** An account that has a directory on a
+  machine but no usable login there is published to Usage Pace through the
+  `account-sign-ins.v1.listSignedOut` RPC and shown in the status warnings.
 - **`bb claude-accounts explain`** tells you which account a thread uses and
   why.
 

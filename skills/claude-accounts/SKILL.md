@@ -21,7 +21,10 @@ nothing else. The `accounts` setting still wins for a directory it names.
 - `bb claude-accounts [status] [--json]` — every account with its plan, the
   machines it is signed in on, its usage windows, how many threads are pinned
   to it, any block from a recent limit failure, and warnings (logins about to
-  expire, accounts that share an organization and therefore a quota).
+  expire or already expired, accounts not signed in on a machine that has their
+  directory, accounts that share an organization and therefore a quota).
+  Those signed-out machines are also published to Usage Pace through the
+  `account-sign-ins.v1.listSignedOut` RPC.
 - `bb claude-accounts explain [thread-id] [--json]` — the thread's pin, the
   last decision with its reason and any queued retry, and what the thread's
   next turn would pick. Without an id it uses the current thread.

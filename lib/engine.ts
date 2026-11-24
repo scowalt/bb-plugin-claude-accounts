@@ -110,6 +110,12 @@ export interface MachineStatus {
   error: string | null;
 }
 
+export interface SignedOutMachine {
+  hostId: string;
+  hostName: string;
+  status: "unauthenticated" | "expired";
+}
+
 export interface AccountStatus {
   name: string;
   directory: string;
@@ -187,6 +193,32 @@ function isStructuredRateLimit(event: PluginTurnFailedEvent): boolean {
   return event.errorInfo?.category === "rate-limit" || event.errorInfo?.httpStatusCode === 429;
 }
 
+function accountKeyOf(identity: InspectedAccount | undefined): string | null {
+  return identity?.accountUuid ? `anthropic:account:${identity.accountUuid}` : null;
+}
+
+export function signedOutMachines(
+  inventories: Iterable<HostInventory>,
+  hostNames: ReadonlyMap<string, string>,
+  directory: string,
+  now: number,
+): SignedOutMachine[] {
+  const machines: SignedOutMachine[] = [];
+  for (const inventory of inventories) {
+    const account = inventory.accounts.find((candidate) => candidate.directory === directory);
+    if (!account?.exists) continue;
+    const status = !account.signedIn
+      ? "unauthenticated"
+      : account.refreshTokenExpiresAt !== null && account.refreshTokenExpiresAt <= now
+        ? "expired"
+        : null;
+    if (status !== null) {
+      machines.push({ hostId: inventory.hostId, hostName: hostNames.get(inventory.hostId) ?? inventory.hostId, status });
+    }
+  }
+  return machines;
+}
+
 export class Engine {
   private readonly kv: PluginKvStorage;
   private readonly sdk: () => PluginBbSdk;
@@ -196,6 +228,8 @@ export class Engine {
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly inventories = new Map<string, HostInventory>();
+  private hostNameById: ReadonlyMap<string, string> = new Map();
+  private hostsListed = false;
   private readonly usage = new Map<string, AccountUsage>();
   private readonly plans = new Map<string, AccountPlan>();
   private readonly blocks = new Map<string, Block>();
@@ -271,7 +305,7 @@ export class Engine {
     const settings = await this.currentSettings();
     let hosts: Array<{ id: string; status: string }> = [];
     try {
-      hosts = await this.sdk().hosts.list();
+      hosts = await this.listHosts();
     } catch (error) {
       this.log.warn(`Could not list machines: ${errorText(error)}`);
     }
@@ -283,6 +317,18 @@ export class Engine {
     await Promise.all(
       settings.accounts.flatMap((spec) => [this.refreshUsage(spec, signal), this.refreshPlan(spec, readPlansNow, signal)]),
     );
+  }
+
+  private async listHosts() {
+    const hosts = await this.sdk().hosts.list();
+    this.hostNameById = new Map(hosts.map((host) => [host.id, host.name]));
+    this.hostsListed = true;
+    return hosts;
+  }
+
+  private signedOutOn(directory: string, now: number): SignedOutMachine[] {
+    const listed = [...this.inventories.values()].filter((inventory) => !this.hostsListed || this.hostNameById.has(inventory.hostId));
+    return signedOutMachines(listed, this.hostNameById, directory, now);
   }
 
   private async inspectHost(hostId: string, settings: EngineSettings, signal?: AbortSignal): Promise<void> {
@@ -441,7 +487,7 @@ export class Engine {
       const account = inventory.accounts.find((candidate) => candidate.directory === spec.directory);
       if (!account) continue;
       if (account.signedIn && account.rateLimitTier !== null) return account;
-      fallback ??= account;
+      if (!fallback || (fallback.accountUuid === null && account.accountUuid !== null)) fallback = account;
     }
     return fallback;
   }
@@ -909,13 +955,8 @@ export class Engine {
   async status(): Promise<EngineStatus> {
     const settings = await this.currentSettings();
     const now = this.now();
-    let hosts: Array<{ id: string; name: string }> = [];
-    try {
-      hosts = await this.sdk().hosts.list();
-    } catch {
-      hosts = [...this.inventories.keys()].map((id) => ({ id, name: id }));
-    }
-    const hostName = new Map(hosts.map((host) => [host.id, host.name]));
+    await this.listHosts().catch(() => {});
+    const hostName = this.hostNameById;
     const pinCounts = new Map<string, number>();
     for (const name of await this.kv.list("pin:")) {
       const pin = await this.kv.get<Pin>(name);
@@ -939,7 +980,16 @@ export class Engine {
           error: account?.error ?? null,
         };
       });
+      const signedOut = this.signedOutOn(spec.directory, now);
+      for (const machine of signedOut) {
+        warnings.push(
+          machine.status === "unauthenticated"
+            ? `${spec.name} is not signed in on ${machine.hostName}; sign in with CLAUDE_CONFIG_DIR=${spec.directory} claude.`
+            : `${spec.name}'s login on ${machine.hostName} expired; sign in again with CLAUDE_CONFIG_DIR=${spec.directory} claude.`,
+        );
+      }
       for (const machine of machines) {
+        if (signedOut.some((entry) => entry.hostId === machine.hostId)) continue;
         if (machine.refreshTokenExpiresAt !== null && machine.refreshTokenExpiresAt - now < LOGIN_EXPIRY_WARNING_MS) {
           warnings.push(
             `${spec.name}'s login on ${machine.hostName} expires ${new Date(machine.refreshTokenExpiresAt).toISOString()}; sign in again with CLAUDE_CONFIG_DIR=${spec.directory} claude.`,
@@ -996,13 +1046,27 @@ export class Engine {
       const plan = this.plan(spec);
       return {
         spec,
-        accountKey: identity?.accountUuid ? `anthropic:account:${identity.accountUuid}` : null,
+        accountKey: accountKeyOf(identity),
         email: identity?.email ?? null,
         plan: planLabel(plan.rateLimitTier, plan.subscriptionType),
         subscriptionType: plan.subscriptionType,
         multiplier: Number(/max_(\d+)x/u.exec(plan.rateLimitTier ?? "")?.[1]) || null,
         usage: this.usage.get(spec.name) ?? null,
       };
+    });
+  }
+
+  async signedOutList() {
+    const settings = await this.currentSettings();
+    const now = this.now();
+    return settings.accounts.flatMap((spec) => {
+      const accountKey = accountKeyOf(this.identity(spec));
+      if (accountKey === null) return [];
+      return this.signedOutOn(spec.directory, now).map((machine) => ({
+        providerId: "claude-code",
+        accountKey,
+        ...machine,
+      }));
     });
   }
 }

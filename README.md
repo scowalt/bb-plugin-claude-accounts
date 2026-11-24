@@ -60,6 +60,10 @@ Claude Code's own `/login`.
   never leave the machine; only Claude Code renews or rewrites them.
   Every account appears as a "Claude Accounts" group in bb's usage card,
   through the `provider-usage.v1` contract.
+- **Signed-out machines are flagged.** An account whose directory exists on a
+  machine without a usable login (never signed in, or the login expired) is
+  published through the `account-sign-ins.v1.listSignedOut` RPC, which Usage
+  Pace reads, and shown as a warning in `bb claude-accounts status`.
 - **Plans come from Anthropic.** A login's files keep the plan it signed in on,
   so after an upgrade they still name the old plan. The plugin reads each
   account's plan from Anthropic's profile endpoint, as Claude Code does, at
