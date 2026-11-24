@@ -15,6 +15,7 @@ import { hostContract } from "./lib/contract";
 import { Engine, type EngineSettings, type HostDirectoryClient } from "./lib/engine";
 import { formatAccounts, formatExplanation, formatStatus } from "./lib/format";
 import { retryAvailabilityContract, retryAvailabilityMethod } from "./lib/retry-contract";
+import { signedOutListMethod, signedOutRpcContract } from "./lib/signed-out-contract";
 import {
   usageFetchMethod,
   usageListMethod,
@@ -225,6 +226,15 @@ export default async function plugin(bb: BbPluginApi) {
     {
       experimental_discoverable: true,
       experimental_description: "Usage windows for the Claude accounts that Claude Accounts spreads Pi threads across.",
+    },
+  );
+
+  bb.rpc.register(
+    signedOutRpcContract,
+    { [signedOutListMethod]: async () => ({ machines: await engine.signedOutList() }) },
+    {
+      experimental_discoverable: true,
+      experimental_description: "Machines where a Claude account Claude Accounts manages has no usable login.",
     },
   );
 

@@ -98,6 +98,11 @@ async function setup(
       ...options.plans,
     }),
   );
+  const logins = new Map<string, { [Field in keyof ReturnType<typeof inspected>]?: ReturnType<typeof inspected>[Field] | null }>();
+  const hostList = {
+    hangs: false,
+    names: { [BEELINK]: "beelink", [MACBOOK]: "macbook" } as Record<string, string>,
+  };
   const usageReads: string[] = [];
   const planReads: string[] = [];
   const retries: Array<{ threadId: string; turnRequestId?: string; sendAt?: number; reason?: string }> = [];
@@ -172,10 +177,13 @@ async function setup(
         },
       },
       hosts: {
-        list: async () => [
-          makeHostResponse({ id: BEELINK, name: "beelink", status: "connected" }),
-          makeHostResponse({ id: MACBOOK, name: "macbook", status: "connected" }),
-        ],
+        list: async () =>
+          hostList.hangs
+            ? new Promise<never>(() => {})
+            : [
+                makeHostResponse({ id: BEELINK, name: hostList.names[BEELINK]!, status: "connected" }),
+                makeHostResponse({ id: MACBOOK, name: hostList.names[MACBOOK]!, status: "connected" }),
+              ],
       },
       system: { config: async () => ({ primaryHostId: BEELINK }) as never },
     } as never,
@@ -185,7 +193,7 @@ async function setup(
         return {
           home: hostId === MACBOOK ? "/Users/u" : "/home/u",
           platform: hostId === MACBOOK ? "darwin" : "linux",
-          accounts: directories.map((directory) => inspected(directory, hostId)),
+          accounts: directories.map((directory) => ({ ...inspected(directory, hostId), ...logins.get(`${hostId}|${directory}`) })),
           discovered: (options.discovered ?? [])
             .filter((entry) => (entry.on ?? BEELINK) === hostId)
             .map((entry) => ({ directory: entry.directory, isDefault: false, signedIn: entry.signedIn ?? true })),
@@ -267,6 +275,8 @@ async function setup(
     threads,
     usage,
     plans,
+    logins,
+    hostList,
     usageReads,
     planReads,
     retries,
@@ -734,6 +744,90 @@ describe("claude-accounts", () => {
       ["weekly", "Weekly limit", 17],
       ["weekly", "Weekly · Fable", 1],
     ]);
+  });
+
+  describe("signed-out machines", () => {
+    const B_ON_MACBOOK = `${MACBOOK}|~/.claude-b`;
+    type Harness = Awaited<ReturnType<typeof setup>>["harness"];
+    const signedOut = async (harness: Harness) =>
+      ((await harness.behavior.callRpc("account-sign-ins.v1.listSignedOut", {})) as { machines: unknown[] }).machines;
+    const warnings = async (harness: Harness) =>
+      (JSON.parse((await harness.behavior.runCli(["status", "--json"])).stdout) as { warnings: string[] }).warnings;
+    const B_SIGNED_OUT_ON_MACBOOK = {
+      providerId: "claude-code",
+      accountKey: "anthropic:account:uuid-b",
+      hostId: MACBOOK,
+      hostName: "macbook",
+      status: "unauthenticated",
+    };
+
+    it("lists a machine whose directory for an account has no login, and warns about it", async () => {
+      const { harness, logins, refresh } = await setup();
+      logins.set(B_ON_MACBOOK, { exists: true, signedIn: false });
+      await refresh();
+      expect(await signedOut(harness)).toEqual([B_SIGNED_OUT_ON_MACBOOK]);
+      expect(await warnings(harness)).toContain("B is not signed in on macbook; sign in with CLAUDE_CONFIG_DIR=~/.claude-b claude.");
+    });
+
+    it("lists a machine whose login expired, without also warning that it expires soon", async () => {
+      const { harness, logins, refresh } = await setup();
+      logins.set(B_ON_MACBOOK, { exists: true, signedIn: true, refreshTokenExpiresAt: Date.now() - 60_000 });
+      await refresh();
+      expect(await signedOut(harness)).toEqual([{ ...B_SIGNED_OUT_ON_MACBOOK, status: "expired" }]);
+      const all = await warnings(harness);
+      expect(all).toContain("B's login on macbook expired; sign in again with CLAUDE_CONFIG_DIR=~/.claude-b claude.");
+      expect(all.filter((warning) => warning.includes("macbook"))).toHaveLength(1);
+    });
+
+    it("lists nothing for a directory a machine never set up or a good login", async () => {
+      const { harness } = await setup();
+      expect(await signedOut(harness)).toEqual([]);
+      expect((await warnings(harness)).join("\n")).not.toContain("not signed in");
+    });
+
+    it("lists nothing for a login that only expires soon, and still warns about it", async () => {
+      const { harness, logins, refresh } = await setup();
+      logins.set(B_ON_MACBOOK, { exists: true, signedIn: true, refreshTokenExpiresAt: Date.now() + 86_400_000 });
+      await refresh();
+      expect(await signedOut(harness)).toEqual([]);
+      expect((await warnings(harness)).filter((warning) => warning.includes("macbook"))).toEqual([
+        expect.stringContaining("B's login on macbook expires "),
+      ]);
+    });
+
+    it("lists nothing for an account whose identity no machine knows", async () => {
+      const { harness, logins, refresh } = await setup();
+      const unknown = { accountUuid: null, email: null };
+      logins.set(B_ON_MACBOOK, { exists: true, signedIn: false, ...unknown });
+      logins.set(`${BEELINK}|~/.claude-b`, { exists: true, signedIn: false, ...unknown });
+      await refresh();
+      expect(await signedOut(harness)).toEqual([]);
+      expect(await warnings(harness)).toContain("B is not signed in on macbook; sign in with CLAUDE_CONFIG_DIR=~/.claude-b claude.");
+    });
+
+    it("keeps usage resources to one shared resource per account", async () => {
+      const { harness, logins, refresh } = await setup();
+      logins.set(B_ON_MACBOOK, { exists: true, signedIn: false });
+      await refresh();
+      const { resources } = (await harness.behavior.callRpc("provider-usage.v1.listResources", {})) as {
+        resources: Array<{ id: string; scope: unknown }>;
+      };
+      expect(resources).toEqual([
+        expect.objectContaining({ id: "A", scope: { kind: "shared" } }),
+        expect.objectContaining({ id: "B", scope: { kind: "shared" } }),
+      ]);
+    });
+
+    it("answers from the last machine listing while a listing hangs", async () => {
+      const { harness, logins, hostList, refresh } = await setup();
+      logins.set(B_ON_MACBOOK, { exists: true, signedIn: false });
+      hostList.names[MACBOOK] = "macbook-pro";
+      await refresh();
+      hostList.hangs = true;
+      const answered = <T>(work: Promise<T>) =>
+        Promise.race([work, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("blocked on hosts.list")), 500))]);
+      expect(await answered(signedOut(harness))).toEqual([{ ...B_SIGNED_OUT_ON_MACBOOK, hostName: "macbook-pro" }]);
+    });
   });
 
   it("adds a signed-in directory the setting does not name", async () => {
