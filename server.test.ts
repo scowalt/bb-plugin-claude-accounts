@@ -805,6 +805,23 @@ describe("claude-accounts", () => {
       expect(await warnings(harness)).toContain("B is not signed in on macbook; sign in with CLAUDE_CONFIG_DIR=~/.claude-b claude.");
     });
 
+    it("keeps the account's key when only a machine listed after a signed-out one knows it", async () => {
+      const { harness, logins, refresh } = await setup();
+      logins.set(`${BEELINK}|~/.claude-b`, {
+        exists: true,
+        signedIn: false,
+        accountUuid: null,
+        email: null,
+        subscriptionType: null,
+        rateLimitTier: null,
+      });
+      logins.set(B_ON_MACBOOK, { exists: true, signedIn: true, rateLimitTier: null });
+      await refresh();
+      expect(await signedOut(harness)).toEqual([
+        { ...B_SIGNED_OUT_ON_MACBOOK, hostId: BEELINK, hostName: "beelink" },
+      ]);
+    });
+
     it("keeps usage resources to one shared resource per account", async () => {
       const { harness, logins, refresh } = await setup();
       logins.set(B_ON_MACBOOK, { exists: true, signedIn: false });

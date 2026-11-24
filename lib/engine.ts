@@ -480,7 +480,7 @@ export class Engine {
       const account = inventory.accounts.find((candidate) => candidate.directory === spec.directory);
       if (!account) continue;
       if (account.signedIn && account.rateLimitTier !== null) return account;
-      fallback ??= account;
+      if (!fallback || (fallback.accountUuid === null && account.accountUuid !== null)) fallback = account;
     }
     return fallback;
   }
