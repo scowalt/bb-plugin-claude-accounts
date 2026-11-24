@@ -229,6 +229,7 @@ export class Engine {
   private readonly random: () => number;
   private readonly inventories = new Map<string, HostInventory>();
   private hostNameById: ReadonlyMap<string, string> = new Map();
+  private hostsListed = false;
   private readonly usage = new Map<string, AccountUsage>();
   private readonly plans = new Map<string, AccountPlan>();
   private readonly blocks = new Map<string, Block>();
@@ -321,7 +322,13 @@ export class Engine {
   private async listHosts() {
     const hosts = await this.sdk().hosts.list();
     this.hostNameById = new Map(hosts.map((host) => [host.id, host.name]));
+    this.hostsListed = true;
     return hosts;
+  }
+
+  private signedOutOn(directory: string, now: number): SignedOutMachine[] {
+    const listed = [...this.inventories.values()].filter((inventory) => !this.hostsListed || this.hostNameById.has(inventory.hostId));
+    return signedOutMachines(listed, this.hostNameById, directory, now);
   }
 
   private async inspectHost(hostId: string, settings: EngineSettings, signal?: AbortSignal): Promise<void> {
@@ -973,7 +980,7 @@ export class Engine {
           error: account?.error ?? null,
         };
       });
-      const signedOut = signedOutMachines(this.inventories.values(), hostName, spec.directory, now);
+      const signedOut = this.signedOutOn(spec.directory, now);
       for (const machine of signedOut) {
         warnings.push(
           machine.status === "unauthenticated"
@@ -1055,7 +1062,7 @@ export class Engine {
     return settings.accounts.flatMap((spec) => {
       const accountKey = accountKeyOf(this.identity(spec));
       if (accountKey === null) return [];
-      return signedOutMachines(this.inventories.values(), this.hostNameById, spec.directory, now).map((machine) => ({
+      return this.signedOutOn(spec.directory, now).map((machine) => ({
         providerId: "claude-code",
         accountKey,
         ...machine,

@@ -101,6 +101,7 @@ async function setup(
   const logins = new Map<string, { [Field in keyof ReturnType<typeof inspected>]?: ReturnType<typeof inspected>[Field] | null }>();
   const hostList = {
     hangs: false,
+    removed: new Set<string>(),
     names: { [BEELINK]: "beelink", [MACBOOK]: "macbook" } as Record<string, string>,
   };
   const usageReads: string[] = [];
@@ -180,10 +181,9 @@ async function setup(
         list: async () =>
           hostList.hangs
             ? new Promise<never>(() => {})
-            : [
-                makeHostResponse({ id: BEELINK, name: hostList.names[BEELINK]!, status: "connected" }),
-                makeHostResponse({ id: MACBOOK, name: hostList.names[MACBOOK]!, status: "connected" }),
-              ],
+            : [BEELINK, MACBOOK]
+                .filter((id) => !hostList.removed.has(id))
+                .map((id) => makeHostResponse({ id, name: hostList.names[id]!, status: "connected" })),
       },
       system: { config: async () => ({ primaryHostId: BEELINK }) as never },
     } as never,
@@ -820,6 +820,17 @@ describe("claude-accounts", () => {
       expect(await signedOut(harness)).toEqual([
         { ...B_SIGNED_OUT_ON_MACBOOK, hostId: BEELINK, hostName: "beelink" },
       ]);
+    });
+
+    it("skips a machine that bb no longer lists", async () => {
+      const { harness, logins, hostList, refresh } = await setup();
+      logins.set(B_ON_MACBOOK, { exists: true, signedIn: false });
+      await refresh();
+      expect(await signedOut(harness)).toEqual([B_SIGNED_OUT_ON_MACBOOK]);
+      hostList.removed.add(MACBOOK);
+      await refresh();
+      expect(await signedOut(harness)).toEqual([]);
+      expect((await warnings(harness)).join("\n")).not.toContain("macbook");
     });
 
     it("keeps usage resources to one shared resource per account", async () => {
